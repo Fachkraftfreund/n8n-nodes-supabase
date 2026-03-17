@@ -17,21 +17,21 @@ import { ISupabaseCredentials, SupabaseResource, DatabaseOperation, StorageOpera
 
 export class Supabase implements INodeType {
 	description: INodeTypeDescription = {
-		displayName: 'Supabase',
-		name: 'supabase',
+		displayName: 'Supabase Extended',
+		name: 'supabaseExtended',
 		icon: 'file:icons/supabase.svg',
 		group: ['database'],
 		version: 1,
 		subtitle: '={{$parameter["operation"] + ": " + $parameter["resource"]}}',
 		description: 'Interact with Supabase database and storage',
 		defaults: {
-			name: 'Supabase',
+			name: 'Supabase Extended',
 		},
 		inputs: ['main'],
 		outputs: ['main'],
 		credentials: [
 			{
-				name: 'supabaseApi',
+				name: 'supabaseExtendedApi',
 				required: true,
 			},
 		],
@@ -694,7 +694,7 @@ export class Supabase implements INodeType {
 		const returnData: INodeExecutionData[] = [];
 
 		// Get credentials
-		const credentials = await this.getCredentials('supabaseApi') as unknown as ISupabaseCredentials;
+		const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
 		
 		// Validate credentials
 		try {
@@ -757,7 +757,7 @@ export class Supabase implements INodeType {
 		loadOptions: {
 			// Load available buckets from Supabase Storage
 			async getBuckets(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
-				const credentials = await this.getCredentials('supabaseApi') as unknown as ISupabaseCredentials;
+				const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
 				
 				try {
 					validateCredentials(credentials);

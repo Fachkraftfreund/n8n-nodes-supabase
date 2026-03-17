@@ -46,7 +46,7 @@
   "n8n": {
     "n8nNodesApiVersion": 1,
     "credentials": [
-      "dist/credentials/SupabaseApi.credentials.js"
+      "dist/credentials/SupabaseExtendedApi.credentials.js"
     ],
     "nodes": [
       "dist/nodes/Supabase/Supabase.node.js"
