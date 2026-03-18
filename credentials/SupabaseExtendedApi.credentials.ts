@@ -23,15 +23,16 @@ export class SupabaseExtendedApi implements ICredentialType {
 			description: 'Your Supabase project URL',
 		},
 		{
-			displayName: 'Service Role Secret',
+			displayName: 'Secret Key',
 			name: 'serviceKey',
 			type: 'string',
 			default: '',
+			placeholder: 'sb_secret_...',
 			typeOptions: {
 				password: true,
 			},
 			required: true,
-			description: 'Your Supabase API key (service_role key recommended for full access)',
+			description: 'Your Supabase Secret key (sb_secret_... from Project Settings → API Keys). Legacy service_role JWTs are also supported.',
 		},
 		{
 			displayName: 'Additional Options',
@@ -56,7 +57,6 @@ export class SupabaseExtendedApi implements ICredentialType {
 		properties: {
 			headers: {
 				apikey: '={{$credentials.serviceKey}}',
-				Authorization: 'Bearer {{$credentials.serviceKey}}',
 			},
 		},
 	};
@@ -68,7 +68,6 @@ export class SupabaseExtendedApi implements ICredentialType {
 			method: 'GET',
 			headers: {
 				apikey: '={{$credentials.serviceKey}}',
-				Authorization: 'Bearer {{$credentials.serviceKey}}',
 				'Accept': 'application/vnd.pgrst.object+json',
 				'Content-Type': 'application/json',
 			},
