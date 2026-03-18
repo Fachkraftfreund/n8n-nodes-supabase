@@ -140,6 +140,12 @@ export class Supabase implements INodeType {
 						description: 'Execute custom SQL query',
 						action: 'Execute custom query',
 					},
+					{
+						name: 'Find or Create',
+						value: 'findOrCreate',
+						description: 'Return existing row matching criteria, or create it if not found',
+						action: 'Find or create row',
+					},
 				],
 				default: 'read',
 			},
@@ -253,7 +259,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate'],
 					},
 				},
 			},
@@ -337,22 +343,108 @@ export class Supabase implements INodeType {
 				},
 			},
 
-			// On Conflict Column for Upsert
+			// On Conflict Columns for Upsert
 			{
-				displayName: 'On Conflict Column',
+				displayName: 'On Conflict Columns',
 				name: 'onConflict',
-				type: 'options',
-				typeOptions: {
-					loadOptionsMethod: 'getColumns',
-				},
+				type: 'string',
 				default: '',
-				description: 'Column to use for conflict resolution (usually the primary key). Leave empty to use the default.',
+				placeholder: 'id or company_id,name',
+				description: 'Comma-separated column(s) to use for conflict resolution. Required for composite unique constraints (e.g. company_id,name).',
 				displayOptions: {
 					show: {
 						resource: ['database'],
 						operation: ['upsert'],
 					},
 				},
+			},
+
+			// Find or Create - Match Columns
+			{
+				displayName: 'Match Columns',
+				name: 'matchColumns',
+				type: 'fixedCollection',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				placeholder: 'Add Match Column',
+				description: 'Columns used to look up an existing row. If a row matches all values, it is returned; otherwise a new row is created.',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['findOrCreate'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Column',
+						name: 'column',
+						values: [
+							{
+								displayName: 'Column',
+								name: 'name',
+								type: 'options',
+								typeOptions: {
+									loadOptionsMethod: 'getColumns',
+								},
+								default: '',
+								description: 'Column to match on',
+							},
+							{
+								displayName: 'Value',
+								name: 'value',
+								type: 'string',
+								default: '',
+								description: 'Value to match',
+							},
+						],
+					},
+				],
+			},
+
+			// Find or Create - Additional Columns (only written on create)
+			{
+				displayName: 'Additional Columns',
+				name: 'additionalColumns',
+				type: 'fixedCollection',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				placeholder: 'Add Column',
+				description: 'Extra columns to set when creating a new row (not used when a match is found)',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['findOrCreate'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Column',
+						name: 'column',
+						values: [
+							{
+								displayName: 'Column',
+								name: 'name',
+								type: 'options',
+								typeOptions: {
+									loadOptionsMethod: 'getColumns',
+								},
+								default: '',
+								description: 'Column name',
+							},
+							{
+								displayName: 'Value',
+								name: 'value',
+								type: 'string',
+								default: '',
+								description: 'Value to set',
+							},
+						],
+					},
+				],
 			},
 
 			// Filters for Read/Update/Delete operations

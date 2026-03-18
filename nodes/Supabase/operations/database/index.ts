@@ -64,6 +64,9 @@ export async function executeDatabaseOperation(
 			case 'customQuery':
 				returnData.push(...await handleCustomQuery.call(this, supabase, itemIndex));
 				break;
+			case 'findOrCreate':
+				returnData.push(...await handleFindOrCreate.call(this, supabase, itemIndex));
+				break;
 			default:
 				throw new Error(`Unknown database operation: ${operation}`);
 		}
@@ -570,8 +573,9 @@ async function handleCustomQuery(
 		throw new Error('SQL query is required');
 	}
 
-	// For SELECT queries, use the regular query method
-	if (customSql.trim().toLowerCase().startsWith('select')) {
+	// For queries that return rows: SELECT, CTEs (WITH), EXPLAIN, TABLE
+	const returnsRows = /^\s*(select|with|explain|table)\b/i.test(customSql);
+	if (returnsRows) {
 		const { data, error } = await supabase.rpc('exec_sql_select', { sql: customSql });
 
 		if (error) {
@@ -607,4 +611,54 @@ async function handleCustomQuery(
 
 		return [{ json: { operation: 'customQuery', sql: customSql, result: data, success: true } }];
 	}
+}
+
+/**
+ * Handle FIND OR CREATE operation
+ */
+async function handleFindOrCreate(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemIndex: number,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', itemIndex) as string;
+	validateTableName(table);
+
+	const matchCols = this.getNodeParameter('matchColumns.column', itemIndex, []) as Array<{ name: string; value: any }>;
+	if (matchCols.length === 0) {
+		throw new Error('At least one Match Column is required for Find or Create');
+	}
+
+	// Build SELECT query from match columns
+	let query = supabase.from(table).select('*');
+	for (const col of matchCols) {
+		if (!col.name) continue;
+		validateColumnName(col.name);
+		query = query.eq(col.name, col.value);
+	}
+	query = query.limit(1);
+
+	const { data: existing, error: readError } = await query;
+	if (readError) throw new Error(formatSupabaseError(readError));
+
+	if (existing && existing.length > 0) {
+		return [{ json: { ...existing[0], _found: true, _created: false } }];
+	}
+
+	// Not found — build insert data from match + additional columns
+	const additionalCols = this.getNodeParameter('additionalColumns.column', itemIndex, []) as Array<{ name: string; value: any }>;
+	const dataToInsert: IDataObject = {};
+	for (const col of [...matchCols, ...additionalCols]) {
+		if (col.name) dataToInsert[col.name] = col.value;
+	}
+
+	const { data: created, error: insertError } = await supabase
+		.from(table)
+		.insert(dataToInsert)
+		.select()
+		.single();
+
+	if (insertError) throw new Error(formatSupabaseError(insertError));
+
+	return [{ json: { ...created, _found: false, _created: true } }];
 }
