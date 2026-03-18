@@ -259,7 +259,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert'],
 					},
 				},
 			},
@@ -278,7 +278,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate'],
 					},
 				},
 			},
