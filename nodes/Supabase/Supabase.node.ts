@@ -262,10 +262,12 @@ export class Supabase implements INodeType {
 			{
 				displayName: 'Table',
 				name: 'table',
-				type: 'string',
+				type: 'options',
+				typeOptions: {
+					loadOptionsMethod: 'getTables',
+				},
 				required: true,
 				default: '',
-				placeholder: 'users',
 				description: 'Name of the table to operate on',
 				displayOptions: {
 					show: {
@@ -300,9 +302,11 @@ export class Supabase implements INodeType {
 							{
 								displayName: 'Name',
 								name: 'name',
-								type: 'string',
+								type: 'options',
+								typeOptions: {
+									loadOptionsMethod: 'getColumns',
+								},
 								default: '',
-								placeholder: 'column_name',
 								description: 'Name of the column',
 							},
 							{
@@ -358,9 +362,11 @@ export class Supabase implements INodeType {
 							{
 								displayName: 'Column',
 								name: 'column',
-								type: 'string',
+								type: 'options',
+								typeOptions: {
+									loadOptionsMethod: 'getColumns',
+								},
 								default: '',
-								placeholder: 'column_name',
 								description: 'Column to filter on',
 							},
 							{
@@ -452,9 +458,11 @@ export class Supabase implements INodeType {
 							{
 								displayName: 'Column',
 								name: 'column',
-								type: 'string',
+								type: 'options',
+								typeOptions: {
+									loadOptionsMethod: 'getColumns',
+								},
 								default: '',
-								placeholder: 'column_name',
 								description: 'Column to sort by',
 							},
 							{
@@ -802,26 +810,66 @@ export class Supabase implements INodeType {
 				}
 			},
 
-			// Load available tables from database
+			// Load available tables from database via PostgREST OpenAPI spec
 			async getTables(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
-				return [
-					{
-						name: 'Enter table name manually',
-						value: '',
-						description: 'Please enter the table name manually in the field above',
-					},
-				];
+				const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
+				validateCredentials(credentials);
+				const host = credentials.host.replace(/\/$/, '');
+				try {
+					const response = await this.helpers.request({
+						method: 'GET',
+						url: `${host}/rest/v1/`,
+						headers: {
+							apikey: credentials.serviceKey,
+							Authorization: `Bearer ${credentials.serviceKey}`,
+						},
+						json: true,
+					});
+					const definitions = response.definitions || {};
+					const tables = Object.keys(definitions).sort();
+					if (tables.length === 0) {
+						return [{ name: 'No tables found', value: '', description: 'No tables are exposed via the REST API' }];
+					}
+					return tables.map((tableName: string) => ({ name: tableName, value: tableName }));
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+					return [{ name: `Error: ${errorMessage}`, value: '', description: 'Failed to load tables. Check your credentials.' }];
+				}
 			},
 
-			// Load available columns from selected table
+			// Load available columns from selected table via PostgREST OpenAPI spec
 			async getColumns(this: ILoadOptionsFunctions): Promise<INodePropertyOptions[]> {
-				return [
-					{
-						name: 'Enter column names manually',
-						value: '',
-						description: 'Please enter column names manually in the fields above',
-					},
-				];
+				const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
+				validateCredentials(credentials);
+				const table = this.getCurrentNodeParameter('table') as string;
+				if (!table) {
+					return [{ name: 'Select a table first', value: '', description: 'Choose a table to load its columns' }];
+				}
+				const host = credentials.host.replace(/\/$/, '');
+				try {
+					const response = await this.helpers.request({
+						method: 'GET',
+						url: `${host}/rest/v1/`,
+						headers: {
+							apikey: credentials.serviceKey,
+							Authorization: `Bearer ${credentials.serviceKey}`,
+						},
+						json: true,
+					});
+					const definitions = response.definitions || {};
+					const tableSchema = definitions[table];
+					if (!tableSchema?.properties) {
+						return [{ name: 'No columns found', value: '', description: `Table "${table}" not found or has no columns` }];
+					}
+					return Object.keys(tableSchema.properties).sort().map((col: string) => {
+						const colDef = tableSchema.properties[col];
+						const typeLabel = colDef.format ? `${colDef.type} (${colDef.format})` : colDef.type;
+						return { name: col, value: col, description: typeLabel };
+					});
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+					return [{ name: `Error: ${errorMessage}`, value: '', description: 'Failed to load columns. Check your credentials.' }];
+				}
 			},
 		},
 	};
