@@ -68,7 +68,6 @@ export class SupabaseExtendedApi implements ICredentialType {
 			method: 'GET',
 			headers: {
 				apikey: '={{$credentials.serviceKey}}',
-				'Accept': 'application/vnd.pgrst.object+json',
 				'Content-Type': 'application/json',
 			},
 		},
