@@ -337,6 +337,24 @@ export class Supabase implements INodeType {
 				},
 			},
 
+			// On Conflict Column for Upsert
+			{
+				displayName: 'On Conflict Column',
+				name: 'onConflict',
+				type: 'options',
+				typeOptions: {
+					loadOptionsMethod: 'getColumns',
+				},
+				default: '',
+				description: 'Column to use for conflict resolution (usually the primary key). Leave empty to use the default.',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['upsert'],
+					},
+				},
+			},
+
 			// Filters for Read/Update/Delete operations
 			{
 				displayName: 'Filters',
