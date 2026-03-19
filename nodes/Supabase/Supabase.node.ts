@@ -589,6 +589,19 @@ export class Supabase implements INodeType {
 
 			// Pagination
 			{
+				displayName: 'Return All',
+				name: 'returnAll',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to return all results or limit the number of results',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['read'],
+					},
+				},
+			},
+			{
 				displayName: 'Limit',
 				name: 'limit',
 				type: 'number',
@@ -598,6 +611,7 @@ export class Supabase implements INodeType {
 					show: {
 						resource: ['database'],
 						operation: ['read'],
+						returnAll: [false],
 					},
 				},
 			},
@@ -611,6 +625,7 @@ export class Supabase implements INodeType {
 					show: {
 						resource: ['database'],
 						operation: ['read'],
+						returnAll: [false],
 					},
 				},
 			},

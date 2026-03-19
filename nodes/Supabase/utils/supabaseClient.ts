@@ -167,7 +167,7 @@ export function convertFilterOperator(operator: string): string {
 		'eq': 'eq',
 		'neq': 'neq',
 		'gt': 'gt',
-		'gte': 'gte', 
+		'gte': 'gte',
 		'lt': 'lt',
 		'lte': 'lte',
 		'like': 'like',
@@ -177,6 +177,22 @@ export function convertFilterOperator(operator: string): string {
 		'cs': 'cs', // contains
 		'cd': 'cd', // contained by
 	};
-	
+
 	return operatorMap[operator] || 'eq';
+}
+
+/**
+ * Normalizes a filter value for PostgREST.
+ * The `in` operator requires values wrapped in parentheses: (val1,val2,val3)
+ * The `cs` and `cd` operators require values wrapped in braces: {val1,val2,val3}
+ */
+export function normalizeFilterValue(operator: string, value: string | number | boolean | null): string | number | boolean | null {
+	if (operator === 'in' && typeof value === 'string') {
+		const trimmed = value.trim();
+		if (!trimmed.startsWith('(')) {
+			return `(${trimmed})`;
+		}
+		return trimmed;
+	}
+	return value;
 }

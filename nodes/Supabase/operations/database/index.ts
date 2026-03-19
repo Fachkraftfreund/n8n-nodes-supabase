@@ -12,6 +12,7 @@ import {
 	validateTableName,
 	validateColumnName,
 	convertFilterOperator,
+	normalizeFilterValue,
 	formatSupabaseError,
 } from '../../utils/supabaseClient';
 
@@ -151,7 +152,7 @@ async function handleRead(
 		const filters = this.getNodeParameter('filters.filter', itemIndex, []) as IRowFilter[];
 		for (const filter of filters) {
 			const operator = convertFilterOperator(filter.operator);
-			query = query.filter(filter.column, operator, filter.value);
+			query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
 		}
 	} else {
 		const advancedFilters = this.getNodeParameter('advancedFilters', itemIndex, '') as string;
@@ -162,7 +163,7 @@ async function handleRead(
 				for (const [column, condition] of Object.entries(filters)) {
 					if (typeof condition === 'object' && condition !== null) {
 						const [operator, value] = Object.entries(condition)[0] as [string, any];
-						query = query.filter(column, convertFilterOperator(operator), value);
+						query = query.filter(column, convertFilterOperator(operator), normalizeFilterValue(operator, value));
 					} else {
 						query = query.eq(column, condition);
 					}
@@ -180,27 +181,94 @@ async function handleRead(
 	}
 
 	// Handle pagination
-	const limit = this.getNodeParameter('limit', itemIndex, undefined) as number | undefined;
-	const offset = this.getNodeParameter('offset', itemIndex, undefined) as number | undefined;
+	const returnAll = this.getNodeParameter('returnAll', itemIndex, false) as boolean;
 
-	if (limit !== undefined) {
-		query = query.limit(limit);
-	}
-	if (offset !== undefined) {
-		query = query.range(offset, offset + (limit || 1000) - 1);
-	}
-
-	const { data, error, count } = await query;
-
-	if (error) {
-		throw new Error(formatSupabaseError(error));
-	}
-
-	// Return each row as a separate item for n8n processing
 	const returnData: INodeExecutionData[] = [];
-	if (Array.isArray(data)) {
-		for (const row of data) {
-			returnData.push({ json: row });
+
+	if (returnAll) {
+		// Fetch all rows by paginating in batches
+		const batchSize = 1000;
+		let offset = 0;
+		let hasMore = true;
+
+		while (hasMore) {
+			// Clone the query for each batch by rebuilding it
+			let batchQuery = supabase.from(table).select(returnFields && returnFields !== '*' ? returnFields : '*', { count: 'exact' });
+
+			// Re-apply filters for this batch
+			const batchFilterMode = this.getNodeParameter('filterMode', itemIndex, 'simple') as string;
+			if (batchFilterMode === 'simple') {
+				const batchFilters = this.getNodeParameter('filters.conditions', itemIndex, []) as IRowFilter[];
+				for (const filter of batchFilters) {
+					if (filter.column && filter.value !== undefined) {
+						batchQuery = batchQuery.eq(filter.column, filter.value);
+					}
+				}
+			} else {
+				const batchAdvancedFilters = this.getNodeParameter('advancedFilters', itemIndex, '') as string;
+				if (batchAdvancedFilters) {
+					try {
+						const parsed = JSON.parse(batchAdvancedFilters);
+						for (const condition of parsed) {
+							const { column, operator, value } = condition;
+							if (operator) {
+								batchQuery = batchQuery.filter(column, convertFilterOperator(operator), normalizeFilterValue(operator, value));
+							} else {
+								batchQuery = batchQuery.eq(column, condition);
+							}
+						}
+					} catch {
+						throw new Error('Invalid advanced filters JSON');
+					}
+				}
+			}
+
+			// Re-apply sorting
+			const batchSort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
+			for (const sortField of batchSort) {
+				batchQuery = batchQuery.order(sortField.column, { ascending: sortField.ascending });
+			}
+
+			batchQuery = batchQuery.range(offset, offset + batchSize - 1);
+
+			const { data: batchData, error: batchError } = await batchQuery;
+
+			if (batchError) {
+				throw new Error(formatSupabaseError(batchError));
+			}
+
+			if (Array.isArray(batchData)) {
+				for (const row of batchData) {
+					returnData.push({ json: row });
+				}
+				hasMore = batchData.length === batchSize;
+			} else {
+				hasMore = false;
+			}
+
+			offset += batchSize;
+		}
+	} else {
+		const limit = this.getNodeParameter('limit', itemIndex, undefined) as number | undefined;
+		const offset = this.getNodeParameter('offset', itemIndex, undefined) as number | undefined;
+
+		if (limit !== undefined) {
+			query = query.limit(limit);
+		}
+		if (offset !== undefined) {
+			query = query.range(offset, offset + (limit || 1000) - 1);
+		}
+
+		const { data, error } = await query;
+
+		if (error) {
+			throw new Error(formatSupabaseError(error));
+		}
+
+		if (Array.isArray(data)) {
+			for (const row of data) {
+				returnData.push({ json: row });
+			}
 		}
 	}
 
@@ -209,7 +277,7 @@ async function handleRead(
 		returnData.push({
 			json: {
 				data: [],
-				count: count || 0,
+				count: 0,
 				operation: 'read',
 				table,
 				message: 'No records found',
@@ -262,7 +330,7 @@ async function handleUpdate(
 	const filters = this.getNodeParameter('filters.filter', itemIndex, []) as IRowFilter[];
 	for (const filter of filters) {
 		const operator = convertFilterOperator(filter.operator);
-		query = query.filter(filter.column, operator, filter.value);
+		query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
 	}
 
 	const { data, error } = await query.select();
@@ -296,7 +364,7 @@ async function handleDelete(
 
 	for (const filter of filters) {
 		const operator = convertFilterOperator(filter.operator);
-		query = query.filter(filter.column, operator, filter.value);
+		query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
 	}
 
 	const { data, error } = await query.select();
