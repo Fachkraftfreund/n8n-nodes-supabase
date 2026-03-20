@@ -5,7 +5,6 @@ import {
 	IRowSort,
 	IColumnDefinition,
 	IIndexDefinition,
-	ISupabaseResponse,
 	DatabaseOperation,
 } from '../../types';
 import {
@@ -17,7 +16,7 @@ import {
 } from '../../utils/supabaseClient';
 
 /**
- * Execute database operations
+ * Execute per-item database operations (read, delete, schema ops, etc.)
  */
 export async function executeDatabaseOperation(
 	this: IExecuteFunctions,
@@ -29,20 +28,11 @@ export async function executeDatabaseOperation(
 
 	try {
 		switch (operation) {
-			case 'create':
-				returnData.push(...await handleCreate.call(this, supabase, itemIndex));
-				break;
 			case 'read':
 				returnData.push(...await handleRead.call(this, supabase, itemIndex));
 				break;
-			case 'update':
-				returnData.push(...await handleUpdate.call(this, supabase, itemIndex));
-				break;
 			case 'delete':
 				returnData.push(...await handleDelete.call(this, supabase, itemIndex));
-				break;
-			case 'upsert':
-				returnData.push(...await handleUpsert.call(this, supabase, itemIndex));
 				break;
 			case 'createTable':
 				returnData.push(...await handleCreateTable.call(this, supabase, itemIndex));
@@ -79,85 +69,188 @@ export async function executeDatabaseOperation(
 }
 
 /**
- * Handle CREATE operation
+ * Collect row data from all input items
  */
-async function handleCreate(
+function collectRowData(
+	context: IExecuteFunctions,
+	itemCount: number,
+): IDataObject[] {
+	const rows: IDataObject[] = [];
+	for (let i = 0; i < itemCount; i++) {
+		const uiMode = context.getNodeParameter('uiMode', i, 'simple') as string;
+		let row: IDataObject;
+
+		if (uiMode === 'advanced') {
+			const jsonData = context.getNodeParameter('jsonData', i, '{}') as string;
+			try {
+				row = JSON.parse(jsonData);
+			} catch {
+				throw new Error(`Invalid JSON data at item ${i}`);
+			}
+		} else {
+			const columns = context.getNodeParameter('columns.column', i, []) as Array<{
+				name: string;
+				value: any;
+			}>;
+			row = {};
+			for (const column of columns) {
+				if (column.name && column.value !== undefined) {
+					row[column.name] = column.value;
+				}
+			}
+		}
+		rows.push(row);
+	}
+	return rows;
+}
+
+/**
+ * Execute bulk database operations (single API call for all items)
+ */
+export async function executeBulkDatabaseOperation(
 	this: IExecuteFunctions,
 	supabase: SupabaseClient,
-	itemIndex: number,
+	operation: DatabaseOperation,
+	itemCount: number,
 ): Promise<INodeExecutionData[]> {
-	const table = this.getNodeParameter('table', itemIndex) as string;
-	const uiMode = this.getNodeParameter('uiMode', itemIndex, 'simple') as string;
-	
+	try {
+		switch (operation) {
+			case 'create':
+				return await handleBulkCreate.call(this, supabase, itemCount);
+			case 'upsert':
+				return await handleBulkUpsert.call(this, supabase, itemCount);
+			case 'update':
+				return await handleBulkUpdate.call(this, supabase, itemCount);
+			default:
+				throw new Error(`Operation ${operation} does not support bulk mode`);
+		}
+	} catch (error) {
+		throw new Error(`Database operation failed: ${formatSupabaseError(error)}`);
+	}
+}
+
+/**
+ * Handle bulk CREATE — single .insert() call for all items
+ */
+async function handleBulkCreate(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemCount: number,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', 0) as string;
 	validateTableName(table);
 
-	let dataToInsert: IDataObject;
+	const rows = collectRowData(this, itemCount);
 
-	if (uiMode === 'advanced') {
-		const jsonData = this.getNodeParameter('jsonData', itemIndex, '{}') as string;
-		try {
-			dataToInsert = JSON.parse(jsonData);
-		} catch {
-			throw new Error('Invalid JSON data provided');
-		}
-	} else {
-		const columns = this.getNodeParameter('columns.column', itemIndex, []) as Array<{
-			name: string;
-			value: any;
-		}>;
-		
-		dataToInsert = {};
-		for (const column of columns) {
-			if (column.name && column.value !== undefined) {
-				dataToInsert[column.name] = column.value;
-			}
+	const { data, error } = await supabase
+		.from(table)
+		.insert(rows)
+		.select();
+
+	if (error) throw new Error(formatSupabaseError(error));
+
+	if (Array.isArray(data)) {
+		return data.map((row) => ({ json: row }));
+	}
+	return [{ json: { data, operation: 'create', table } }];
+}
+
+/**
+ * Handle bulk UPSERT — single .upsert() call for all items
+ */
+async function handleBulkUpsert(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemCount: number,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', 0) as string;
+	const onConflict = this.getNodeParameter('onConflict', 0, '') as string;
+	validateTableName(table);
+
+	const rows = collectRowData(this, itemCount);
+
+	const options: any = {};
+	if (onConflict) options.onConflict = onConflict;
+
+	const { data, error } = await supabase
+		.from(table)
+		.upsert(rows, options)
+		.select();
+
+	if (error) throw new Error(formatSupabaseError(error));
+
+	if (Array.isArray(data)) {
+		return data.map((row) => ({ json: row }));
+	}
+	return [{ json: { data, operation: 'upsert', table } }];
+}
+
+/**
+ * Handle bulk UPDATE — uses .upsert() with onConflict match column
+ * Each item must include the match column value in its data.
+ */
+async function handleBulkUpdate(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemCount: number,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', 0) as string;
+	const matchColumn = this.getNodeParameter('matchColumn', 0) as string;
+	validateTableName(table);
+
+	if (!matchColumn) {
+		throw new Error('Match Column is required for update operations');
+	}
+
+	const rows = collectRowData(this, itemCount);
+
+	// Validate every row includes the match column
+	for (let i = 0; i < rows.length; i++) {
+		const row = rows[i];
+		if (!row || row[matchColumn] === undefined) {
+			throw new Error(`Item ${i} is missing the match column "${matchColumn}"`);
 		}
 	}
 
 	const { data, error } = await supabase
 		.from(table)
-		.insert(dataToInsert)
+		.upsert(rows, { onConflict: matchColumn })
 		.select();
 
-	if (error) {
-		throw new Error(formatSupabaseError(error));
-	}
+	if (error) throw new Error(formatSupabaseError(error));
 
-	return [{ json: { data, operation: 'create', table } }];
+	if (Array.isArray(data)) {
+		return data.map((row) => ({ json: row }));
+	}
+	return [{ json: { data, operation: 'update', table } }];
 }
 
 /**
- * Handle READ operation
+ * Build a SELECT query with filters and sorting applied.
  */
-async function handleRead(
-	this: IExecuteFunctions,
+function buildReadQuery(
+	context: IExecuteFunctions,
 	supabase: SupabaseClient,
+	table: string,
+	returnFields: string,
 	itemIndex: number,
-): Promise<INodeExecutionData[]> {
-	const table = this.getNodeParameter('table', itemIndex) as string;
-	const uiMode = this.getNodeParameter('uiMode', itemIndex, 'simple') as string;
-	
-	validateTableName(table);
+	options?: { count?: 'exact' },
+) {
+	const selectFields = returnFields && returnFields !== '*' ? returnFields : '*';
+	let query = supabase.from(table).select(selectFields, options);
 
-	let query = supabase.from(table).select('*');
+	const uiMode = context.getNodeParameter('uiMode', itemIndex, 'simple') as string;
 
-	// Handle columns selection
-	const returnFields = this.getNodeParameter('returnFields', itemIndex, '*') as string;
-	if (returnFields && returnFields !== '*') {
-		query = supabase.from(table).select(returnFields);
-	}
-
-	// Handle filters
+	// Apply filters
 	if (uiMode === 'simple') {
-		const filters = this.getNodeParameter('filters.filter', itemIndex, []) as IRowFilter[];
+		const filters = context.getNodeParameter('filters.filter', itemIndex, []) as IRowFilter[];
 		for (const filter of filters) {
 			const operator = convertFilterOperator(filter.operator);
 			query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
 		}
 	} else {
-		const advancedFilters = this.getNodeParameter('advancedFilters', itemIndex, '') as string;
+		const advancedFilters = context.getNodeParameter('advancedFilters', itemIndex, '') as string;
 		if (advancedFilters) {
-			// Parse and apply advanced filters (JSON format)
 			try {
 				const filters = JSON.parse(advancedFilters);
 				for (const [column, condition] of Object.entries(filters)) {
@@ -174,13 +267,27 @@ async function handleRead(
 		}
 	}
 
-	// Handle sorting
-	const sort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
+	// Apply sorting
+	const sort = context.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
 	for (const sortField of sort) {
 		query = query.order(sortField.column, { ascending: sortField.ascending });
 	}
 
-	// Handle pagination
+	return query;
+}
+
+/**
+ * Handle READ operation
+ */
+async function handleRead(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemIndex: number,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', itemIndex) as string;
+	validateTableName(table);
+
+	const returnFields = this.getNodeParameter('returnFields', itemIndex, '*') as string;
 	const returnAll = this.getNodeParameter('returnAll', itemIndex, false) as boolean;
 
 	const returnData: INodeExecutionData[] = [];
@@ -192,46 +299,8 @@ async function handleRead(
 		let hasMore = true;
 
 		while (hasMore) {
-			// Clone the query for each batch by rebuilding it
-			let batchQuery = supabase.from(table).select(returnFields && returnFields !== '*' ? returnFields : '*', { count: 'exact' });
-
-			// Re-apply filters for this batch
-			const batchFilterMode = this.getNodeParameter('filterMode', itemIndex, 'simple') as string;
-			if (batchFilterMode === 'simple') {
-				const batchFilters = this.getNodeParameter('filters.conditions', itemIndex, []) as IRowFilter[];
-				for (const filter of batchFilters) {
-					if (filter.column && filter.value !== undefined) {
-						batchQuery = batchQuery.eq(filter.column, filter.value);
-					}
-				}
-			} else {
-				const batchAdvancedFilters = this.getNodeParameter('advancedFilters', itemIndex, '') as string;
-				if (batchAdvancedFilters) {
-					try {
-						const parsed = JSON.parse(batchAdvancedFilters);
-						for (const condition of parsed) {
-							const { column, operator, value } = condition;
-							if (operator) {
-								batchQuery = batchQuery.filter(column, convertFilterOperator(operator), normalizeFilterValue(operator, value));
-							} else {
-								batchQuery = batchQuery.eq(column, condition);
-							}
-						}
-					} catch {
-						throw new Error('Invalid advanced filters JSON');
-					}
-				}
-			}
-
-			// Re-apply sorting
-			const batchSort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
-			for (const sortField of batchSort) {
-				batchQuery = batchQuery.order(sortField.column, { ascending: sortField.ascending });
-			}
-
-			batchQuery = batchQuery.range(offset, offset + batchSize - 1);
-
-			const { data: batchData, error: batchError } = await batchQuery;
+			const batchQuery = buildReadQuery(this, supabase, table, returnFields, itemIndex, { count: 'exact' });
+			const { data: batchData, error: batchError } = await batchQuery.range(offset, offset + batchSize - 1);
 
 			if (batchError) {
 				throw new Error(formatSupabaseError(batchError));
@@ -251,6 +320,8 @@ async function handleRead(
 	} else {
 		const limit = this.getNodeParameter('limit', itemIndex, undefined) as number | undefined;
 		const offset = this.getNodeParameter('offset', itemIndex, undefined) as number | undefined;
+
+		let query = buildReadQuery(this, supabase, table, returnFields, itemIndex);
 
 		if (limit !== undefined) {
 			query = query.limit(limit);
@@ -289,60 +360,6 @@ async function handleRead(
 }
 
 /**
- * Handle UPDATE operation
- */
-async function handleUpdate(
-	this: IExecuteFunctions,
-	supabase: SupabaseClient,
-	itemIndex: number,
-): Promise<INodeExecutionData[]> {
-	const table = this.getNodeParameter('table', itemIndex) as string;
-	const uiMode = this.getNodeParameter('uiMode', itemIndex, 'simple') as string;
-	
-	validateTableName(table);
-
-	let dataToUpdate: IDataObject;
-
-	if (uiMode === 'advanced') {
-		const jsonData = this.getNodeParameter('jsonData', itemIndex, '{}') as string;
-		try {
-			dataToUpdate = JSON.parse(jsonData);
-		} catch {
-			throw new Error('Invalid JSON data provided');
-		}
-	} else {
-		const columns = this.getNodeParameter('columns.column', itemIndex, []) as Array<{
-			name: string;
-			value: any;
-		}>;
-		
-		dataToUpdate = {};
-		for (const column of columns) {
-			if (column.name && column.value !== undefined) {
-				dataToUpdate[column.name] = column.value;
-			}
-		}
-	}
-
-	let query = supabase.from(table).update(dataToUpdate);
-
-	// Apply filters to determine which rows to update
-	const filters = this.getNodeParameter('filters.filter', itemIndex, []) as IRowFilter[];
-	for (const filter of filters) {
-		const operator = convertFilterOperator(filter.operator);
-		query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
-	}
-
-	const { data, error } = await query.select();
-
-	if (error) {
-		throw new Error(formatSupabaseError(error));
-	}
-
-	return [{ json: { data, operation: 'update', table, updated: data?.length || 0 } }];
-}
-
-/**
  * Handle DELETE operation
  */
 async function handleDelete(
@@ -374,60 +391,6 @@ async function handleDelete(
 	}
 
 	return [{ json: { data, operation: 'delete', table, deleted: data?.length || 0 } }];
-}
-
-/**
- * Handle UPSERT operation
- */
-async function handleUpsert(
-	this: IExecuteFunctions,
-	supabase: SupabaseClient,
-	itemIndex: number,
-): Promise<INodeExecutionData[]> {
-	const table = this.getNodeParameter('table', itemIndex) as string;
-	const uiMode = this.getNodeParameter('uiMode', itemIndex, 'simple') as string;
-	const onConflict = this.getNodeParameter('onConflict', itemIndex, '') as string;
-	
-	validateTableName(table);
-
-	let dataToUpsert: IDataObject;
-
-	if (uiMode === 'advanced') {
-		const jsonData = this.getNodeParameter('jsonData', itemIndex, '{}') as string;
-		try {
-			dataToUpsert = JSON.parse(jsonData);
-		} catch {
-			throw new Error('Invalid JSON data provided');
-		}
-	} else {
-		const columns = this.getNodeParameter('columns.column', itemIndex, []) as Array<{
-			name: string;
-			value: any;
-		}>;
-		
-		dataToUpsert = {};
-		for (const column of columns) {
-			if (column.name && column.value !== undefined) {
-				dataToUpsert[column.name] = column.value;
-			}
-		}
-	}
-
-	const options: any = {};
-	if (onConflict) {
-		options.onConflict = onConflict;
-	}
-
-	const { data, error } = await supabase
-		.from(table)
-		.upsert(dataToUpsert, options)
-		.select();
-
-	if (error) {
-		throw new Error(formatSupabaseError(error));
-	}
-
-	return [{ json: { data, operation: 'upsert', table } }];
 }
 
 /**
@@ -477,7 +440,7 @@ async function handleCreateTable(
 
 	sql += columnDefs.join(', ') + ')';
 
-	const { data, error } = await supabase.rpc('exec_sql', { sql });
+	const { error } = await supabase.rpc('exec_sql', { sql });
 
 	if (error) {
 		throw new Error(formatSupabaseError(error));
@@ -501,7 +464,7 @@ async function handleDropTable(
 
 	const sql = `DROP TABLE "${tableName}"${cascade ? ' CASCADE' : ''}`;
 
-	const { data, error } = await supabase.rpc('exec_sql', { sql });
+	const { error } = await supabase.rpc('exec_sql', { sql });
 
 	if (error) {
 		throw new Error(formatSupabaseError(error));
@@ -534,7 +497,7 @@ async function handleAddColumn(
 		sql += ` DEFAULT ${columnDefinition.defaultValue}`;
 	}
 
-	const { data, error } = await supabase.rpc('exec_sql', { sql });
+	const { error } = await supabase.rpc('exec_sql', { sql });
 
 	if (error) {
 		throw new Error(formatSupabaseError(error));
@@ -560,7 +523,7 @@ async function handleDropColumn(
 
 	const sql = `ALTER TABLE "${tableName}" DROP COLUMN "${columnName}"${cascade ? ' CASCADE' : ''}`;
 
-	const { data, error } = await supabase.rpc('exec_sql', { sql });
+	const { error } = await supabase.rpc('exec_sql', { sql });
 
 	if (error) {
 		throw new Error(formatSupabaseError(error));
@@ -592,7 +555,7 @@ async function handleCreateIndex(
 
 	const sql = `CREATE ${uniqueKeyword}INDEX "${indexDefinition.name}" ON "${tableName}"${method} (${columnList})`;
 
-	const { data, error } = await supabase.rpc('exec_sql', { sql });
+	const { error } = await supabase.rpc('exec_sql', { sql });
 
 	if (error) {
 		throw new Error(formatSupabaseError(error));
@@ -618,7 +581,7 @@ async function handleDropIndex(
 
 	const sql = `DROP INDEX "${indexName}"${cascade ? ' CASCADE' : ''}`;
 
-	const { data, error } = await supabase.rpc('exec_sql', { sql });
+	const { error } = await supabase.rpc('exec_sql', { sql });
 
 	if (error) {
 		throw new Error(formatSupabaseError(error));

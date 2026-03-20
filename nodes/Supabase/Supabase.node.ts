@@ -11,7 +11,7 @@ import {
 } from 'n8n-workflow';
 
 import { createSupabaseClient, validateCredentials } from './utils/supabaseClient';
-import { executeDatabaseOperation } from './operations/database';
+import { executeDatabaseOperation, executeBulkDatabaseOperation } from './operations/database';
 import { executeStorageOperation } from './operations/storage';
 import { ISupabaseCredentials, SupabaseResource, DatabaseOperation, StorageOperation } from './types';
 
@@ -359,6 +359,25 @@ export class Supabase implements INodeType {
 				},
 			},
 
+			// Match Column for Update (identifies which row to update)
+			{
+				displayName: 'Match Column',
+				name: 'matchColumn',
+				type: 'options',
+				typeOptions: {
+					loadOptionsMethod: 'getColumns',
+				},
+				required: true,
+				default: '',
+				description: 'Column used to match rows for updating (typically the primary key). Each input item must include this column in its data. Uses upsert internally, so rows will be created if no match is found.',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['update'],
+					},
+				},
+			},
+
 			// Find or Create - Match Columns
 			{
 				displayName: 'Match Columns',
@@ -447,7 +466,7 @@ export class Supabase implements INodeType {
 				],
 			},
 
-			// Filters for Read/Update/Delete operations
+			// Filters for Read/Delete operations
 			{
 				displayName: 'Filters',
 				name: 'filters',
@@ -460,7 +479,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read', 'update', 'delete'],
+						operation: ['read', 'delete'],
 						uiMode: ['simple'],
 					},
 				},
@@ -522,7 +541,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read', 'update', 'delete'],
+						operation: ['read', 'delete'],
 						uiMode: ['advanced'],
 					},
 				},
@@ -828,7 +847,7 @@ export class Supabase implements INodeType {
 
 		// Get credentials
 		const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
-		
+
 		// Validate credentials
 		try {
 			validateCredentials(credentials);
@@ -840,46 +859,67 @@ export class Supabase implements INodeType {
 		// Create Supabase client
 		const supabase = createSupabaseClient(credentials);
 
-		// Process each input item
-		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+		// resource and operation are node-level (noDataExpression), same for all items
+		const resource = this.getNodeParameter('resource', 0) as SupabaseResource;
+		const operation = this.getNodeParameter('operation', 0) as DatabaseOperation | StorageOperation;
+
+		// Bulk database operations: collect all items, single API call
+		if (resource === 'database' && ['create', 'upsert', 'update'].includes(operation as string)) {
 			try {
-				const resource = this.getNodeParameter('resource', itemIndex) as SupabaseResource;
-				const operation = this.getNodeParameter('operation', itemIndex) as DatabaseOperation | StorageOperation;
-
-				let operationResults: INodeExecutionData[] = [];
-
-				if (resource === 'database') {
-					operationResults = await executeDatabaseOperation.call(
-						this,
-						supabase,
-						operation as DatabaseOperation,
-						itemIndex,
-					);
-				} else if (resource === 'storage') {
-					operationResults = await executeStorageOperation.call(
-						this,
-						supabase,
-						operation as StorageOperation,
-						itemIndex,
-					);
-				} else {
-					throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`);
-				}
-
-				returnData.push(...operationResults);
-
+				const results = await executeBulkDatabaseOperation.call(
+					this,
+					supabase,
+					operation as DatabaseOperation,
+					items.length,
+				);
+				returnData.push(...results);
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
 				if (this.continueOnFail()) {
-					returnData.push({
-						json: {
-							error: errorMessage,
-							itemIndex,
-						},
-					});
-					continue;
+					returnData.push({ json: { error: errorMessage } });
+				} else {
+					throw new NodeOperationError(this.getNode(), errorMessage);
 				}
-				throw new NodeOperationError(this.getNode(), errorMessage, { itemIndex });
+			}
+		} else {
+			// Per-item processing for all other operations
+			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
+				try {
+					let operationResults: INodeExecutionData[] = [];
+
+					if (resource === 'database') {
+						operationResults = await executeDatabaseOperation.call(
+							this,
+							supabase,
+							operation as DatabaseOperation,
+							itemIndex,
+						);
+					} else if (resource === 'storage') {
+						operationResults = await executeStorageOperation.call(
+							this,
+							supabase,
+							operation as StorageOperation,
+							itemIndex,
+						);
+					} else {
+						throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`);
+					}
+
+					returnData.push(...operationResults);
+
+				} catch (error) {
+					const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+					if (this.continueOnFail()) {
+						returnData.push({
+							json: {
+								error: errorMessage,
+								itemIndex,
+							},
+						});
+						continue;
+					}
+					throw new NodeOperationError(this.getNode(), errorMessage, { itemIndex });
+				}
 			}
 		}
 
