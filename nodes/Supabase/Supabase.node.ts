@@ -845,6 +845,16 @@ export class Supabase implements INodeType {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 
+		// Pass through if input is a single empty object (common n8n "no data" signal)
+		const firstItem = items[0];
+		if (
+			items.length === 1 &&
+			firstItem?.json &&
+			Object.keys(firstItem.json).length === 0
+		) {
+			return [[{ json: {} }]];
+		}
+
 		// Get credentials
 		const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
 
