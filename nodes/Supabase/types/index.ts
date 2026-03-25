@@ -10,7 +10,7 @@ export interface ISupabaseCredentials {
 export interface IRowFilter {
 	column: string;
 	operator: 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte' | 'like' | 'ilike' | 'is' | 'in' | 'cs' | 'cd';
-	value: string | number | boolean | null;
+	value: string | number | boolean | null | unknown[];
 }
 
 export interface IRowSort {

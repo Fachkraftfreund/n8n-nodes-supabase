@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { ISupabaseCredentials } from '../types';
+import { ISupabaseCredentials, IRowFilter } from '../types';
 
 /**
  * Creates a Supabase client instance with the provided credentials
@@ -186,13 +186,75 @@ export function convertFilterOperator(operator: string): string {
  * The `in` operator requires values wrapped in parentheses: (val1,val2,val3)
  * The `cs` and `cd` operators require values wrapped in braces: {val1,val2,val3}
  */
-export function normalizeFilterValue(operator: string, value: string | number | boolean | null): string | number | boolean | null {
-	if (operator === 'in' && typeof value === 'string') {
-		const trimmed = value.trim();
-		if (!trimmed.startsWith('(')) {
-			return `(${trimmed})`;
+export function normalizeFilterValue(operator: string, value: string | number | boolean | null | unknown[]): string | number | boolean | null {
+	if (operator === 'in') {
+		if (Array.isArray(value)) {
+			return `(${value.join(',')})`;
 		}
-		return trimmed;
+		if (typeof value === 'string') {
+			const trimmed = value.trim();
+			if (!trimmed.startsWith('(')) {
+				return `(${trimmed})`;
+			}
+			return trimmed;
+		}
 	}
-	return value;
+	return value as string | number | boolean | null;
+}
+
+/** Maximum number of values per IN filter before chunking into multiple queries */
+export const IN_FILTER_CHUNK_SIZE = 200;
+
+/**
+ * Splits an array into chunks of the specified size.
+ */
+export function chunkArray<T>(arr: T[], size: number): T[][] {
+	const chunks: T[][] = [];
+	for (let i = 0; i < arr.length; i += size) {
+		chunks.push(arr.slice(i, i + size));
+	}
+	return chunks;
+}
+
+/**
+ * Expands filters with large IN arrays into multiple filter sets (one per chunk).
+ * Each returned filter set can be used for an independent query, and the results
+ * should be merged. Chunks are disjoint, so no deduplication is needed.
+ */
+export function expandChunkedFilters(filters: IRowFilter[]): IRowFilter[][] {
+	const staticFilters: IRowFilter[] = [];
+	const chunkedEntries: { filter: IRowFilter; chunks: unknown[][] }[] = [];
+
+	for (const filter of filters) {
+		if (filter.operator === 'in' && Array.isArray(filter.value) && filter.value.length > IN_FILTER_CHUNK_SIZE) {
+			chunkedEntries.push({
+				filter,
+				chunks: chunkArray(filter.value as unknown[], IN_FILTER_CHUNK_SIZE),
+			});
+		} else {
+			staticFilters.push(filter);
+		}
+	}
+
+	if (chunkedEntries.length === 0) {
+		return [filters];
+	}
+
+	// Build Cartesian product of all chunk combinations
+	let combinations: IRowFilter[][] = [staticFilters];
+
+	for (const { filter, chunks } of chunkedEntries) {
+		const newCombinations: IRowFilter[][] = [];
+		for (const existing of combinations) {
+			for (const chunk of chunks) {
+				newCombinations.push([
+					...existing,
+					{ ...filter, value: chunk },
+				]);
+			}
+		}
+		combinations = newCombinations;
+	}
+
+	return combinations;
 }
