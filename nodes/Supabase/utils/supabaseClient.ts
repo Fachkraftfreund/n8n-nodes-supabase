@@ -202,17 +202,42 @@ export function normalizeFilterValue(operator: string, value: string | number | 
 	return value as string | number | boolean | null;
 }
 
-/** Maximum number of values per IN filter before chunking into multiple queries */
-export const IN_FILTER_CHUNK_SIZE = 200;
+/**
+ * Maximum character length for the serialized values of a single IN filter.
+ * Supabase uses Kong/nginx which typically allows ~8KB URLs. We use 4000 chars
+ * as a safe limit per IN clause, leaving room for the base URL, other query
+ * params, and additional filters.
+ */
+export const IN_FILTER_MAX_CHAR_LENGTH = 4000;
 
 /**
- * Splits an array into chunks of the specified size.
+ * Splits an array of values into chunks where each chunk's comma-joined
+ * string representation stays within the character length limit.
  */
-export function chunkArray<T>(arr: T[], size: number): T[][] {
-	const chunks: T[][] = [];
-	for (let i = 0; i < arr.length; i += size) {
-		chunks.push(arr.slice(i, i + size));
+export function chunkInFilterValues(values: unknown[]): unknown[][] {
+	const chunks: unknown[][] = [];
+	let currentChunk: unknown[] = [];
+	let currentLength = 0;
+
+	for (const value of values) {
+		const valueStr = String(value);
+		// +1 for the comma separator between values
+		const addedLength = currentChunk.length === 0 ? valueStr.length : valueStr.length + 1;
+
+		if (currentLength + addedLength > IN_FILTER_MAX_CHAR_LENGTH && currentChunk.length > 0) {
+			chunks.push(currentChunk);
+			currentChunk = [value];
+			currentLength = valueStr.length;
+		} else {
+			currentChunk.push(value);
+			currentLength += addedLength;
+		}
 	}
+
+	if (currentChunk.length > 0) {
+		chunks.push(currentChunk);
+	}
+
 	return chunks;
 }
 
@@ -226,14 +251,17 @@ export function expandChunkedFilters(filters: IRowFilter[]): IRowFilter[][] {
 	const chunkedEntries: { filter: IRowFilter; chunks: unknown[][] }[] = [];
 
 	for (const filter of filters) {
-		if (filter.operator === 'in' && Array.isArray(filter.value) && filter.value.length > IN_FILTER_CHUNK_SIZE) {
-			chunkedEntries.push({
-				filter,
-				chunks: chunkArray(filter.value as unknown[], IN_FILTER_CHUNK_SIZE),
-			});
-		} else {
-			staticFilters.push(filter);
+		if (filter.operator === 'in' && Array.isArray(filter.value)) {
+			const serialized = (filter.value as unknown[]).map(String).join(',');
+			if (serialized.length > IN_FILTER_MAX_CHAR_LENGTH) {
+				chunkedEntries.push({
+					filter,
+					chunks: chunkInFilterValues(filter.value as unknown[]),
+				});
+				continue;
+			}
 		}
+		staticFilters.push(filter);
 	}
 
 	if (chunkedEntries.length === 0) {
