@@ -845,16 +845,6 @@ export class Supabase implements INodeType {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
 
-		// Pass through if input is a single empty object (common n8n "no data" signal)
-		const firstItem = items[0];
-		if (
-			items.length === 1 &&
-			firstItem?.json &&
-			Object.keys(firstItem.json).length === 0
-		) {
-			return [[{ json: {} }]];
-		}
-
 		// Get credentials
 		const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;
 
@@ -874,7 +864,16 @@ export class Supabase implements INodeType {
 		const operation = this.getNodeParameter('operation', 0) as DatabaseOperation | StorageOperation;
 
 		// Bulk database operations: collect all items, single API call
+		// Skip if input is a single empty item (no data to write)
 		if (resource === 'database' && ['create', 'upsert', 'update'].includes(operation as string)) {
+			const firstItem = items[0];
+			if (
+				items.length === 1 &&
+				firstItem?.json &&
+				Object.keys(firstItem.json).length === 0
+			) {
+				return [[{ json: {} }]];
+			}
 			try {
 				const results = await executeBulkDatabaseOperation.call(
 					this,
