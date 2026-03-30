@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { ISupabaseCredentials, IRowFilter } from '../types';
+import { ISupabaseCredentials, IRowFilter, IRowSort } from '../types';
 
 /**
  * Creates a Supabase client instance with the provided credentials
@@ -203,28 +203,77 @@ export function normalizeFilterValue(operator: string, value: string | number | 
 }
 
 /**
- * Maximum character length for the serialized values of a single IN filter.
- * Supabase uses Kong/nginx which typically allows ~8KB URLs. We use 4000 chars
- * as a safe limit per IN clause, leaving room for the base URL, other query
- * params, and additional filters.
+ * Supabase uses Kong/nginx which typically allows ~8KB (8192 byte) URLs.
+ * We use 7500 chars as a safe ceiling to leave room for encoding overhead.
  */
-export const IN_FILTER_MAX_CHAR_LENGTH = 4000;
+export const MAX_SAFE_URL_LENGTH = 7500;
+
+/**
+ * Absolute minimum chars allowed per IN-filter chunk, even when the rest of
+ * the URL eats into the budget.  Prevents degenerate 1-value chunks.
+ */
+const MIN_IN_CHUNK_CHARS = 500;
+
+/**
+ * Estimates how many URL characters the non-IN-value parts of a PostgREST
+ * query will consume.  The caller subtracts this from MAX_SAFE_URL_LENGTH
+ * to obtain the budget available for IN filter values.
+ */
+export function estimateUrlOverhead(
+	hostUrl: string,
+	table: string,
+	selectFields?: string,
+	filters?: IRowFilter[],
+	sort?: IRowSort[],
+): number {
+	// {host}/rest/v1/{table}?
+	let overhead = hostUrl.length + '/rest/v1/'.length + table.length + 1;
+
+	// select={fields}&
+	if (selectFields) {
+		overhead += 'select='.length + selectFields.length + 1;
+	}
+
+	if (filters) {
+		for (const f of filters) {
+			if (f.operator === 'in') {
+				// Only the fixed prefix: {col}=in.()&
+				overhead += f.column.length + '=in.()&'.length;
+			} else {
+				const val = normalizeFilterValue(f.operator, f.value);
+				// {col}={op}.{value}&
+				overhead += f.column.length + 1 + f.operator.length + 1 + String(val).length + 1;
+			}
+		}
+	}
+
+	if (sort) {
+		for (const s of sort) {
+			// order={col}.asc&  or  order={col}.desc&
+			overhead += 'order='.length + s.column.length + 1 + (s.ascending ? 3 : 4) + 1;
+		}
+	}
+
+	// Pagination params (offset + limit/range) + safety margin
+	overhead += 230;
+
+	return overhead;
+}
 
 /**
  * Splits an array of values into chunks where each chunk's comma-joined
- * string representation stays within the character length limit.
+ * string representation stays within `maxChars`.
  */
-export function chunkInFilterValues(values: unknown[]): unknown[][] {
+export function chunkInFilterValues(values: unknown[], maxChars: number): unknown[][] {
 	const chunks: unknown[][] = [];
 	let currentChunk: unknown[] = [];
 	let currentLength = 0;
 
 	for (const value of values) {
 		const valueStr = String(value);
-		// +1 for the comma separator between values
 		const addedLength = currentChunk.length === 0 ? valueStr.length : valueStr.length + 1;
 
-		if (currentLength + addedLength > IN_FILTER_MAX_CHAR_LENGTH && currentChunk.length > 0) {
+		if (currentLength + addedLength > maxChars && currentChunk.length > 0) {
 			chunks.push(currentChunk);
 			currentChunk = [value];
 			currentLength = valueStr.length;
@@ -244,15 +293,25 @@ export function chunkInFilterValues(values: unknown[]): unknown[][] {
 /**
  * Expands filters with large IN arrays into multiple filter sets (one per chunk).
  * Each returned filter set can be used for an independent query, and the results
- * should be merged. Chunks are disjoint, so no deduplication is needed.
+ * should be merged.  Chunks are disjoint, so no deduplication is needed.
+ *
+ * @param maxInChars  Maximum chars available for IN values in the URL.
+ *                    When multiple IN filters need chunking the budget is
+ *                    split equally among them.  Falls back to a safe default
+ *                    when omitted (useful in non-read contexts like delete).
  */
-export function expandChunkedFilters(filters: IRowFilter[]): IRowFilter[][] {
+export function expandChunkedFilters(
+	filters: IRowFilter[],
+	maxInChars?: number,
+): IRowFilter[][] {
 	const staticFilters: IRowFilter[] = [];
-	const chunkedEntries: { filter: IRowFilter; chunks: unknown[][] }[] = [];
+
+	// First pass: normalise IN values to arrays and collect those that exceed the budget
+	interface InEntry { filter: IRowFilter; values: unknown[]; serializedLength: number }
+	const inEntries: InEntry[] = [];
 
 	for (const filter of filters) {
 		if (filter.operator === 'in') {
-			// Normalize the value to an array regardless of input type (string or array)
 			let values: unknown[];
 			if (Array.isArray(filter.value)) {
 				values = filter.value;
@@ -266,20 +325,44 @@ export function expandChunkedFilters(filters: IRowFilter[]): IRowFilter[][] {
 				continue;
 			}
 
-			const serialized = values.map(String).join(',');
-			if (serialized.length > IN_FILTER_MAX_CHAR_LENGTH) {
-				chunkedEntries.push({
-					filter: { ...filter, value: values },
-					chunks: chunkInFilterValues(values),
-				});
-				continue;
-			}
+			const serializedLength = values.map(String).join(',').length;
+			inEntries.push({ filter: { ...filter, value: values }, values, serializedLength });
+			continue;
 		}
 		staticFilters.push(filter);
 	}
 
-	if (chunkedEntries.length === 0) {
+	if (inEntries.length === 0) {
 		return [filters];
+	}
+
+	// Determine per-IN-filter budget.
+	// When maxInChars is provided the budget is split across all IN filters;
+	// otherwise fall back to a conservative default per filter.
+	const defaultBudget = MAX_SAFE_URL_LENGTH - 500; // rough fallback
+	const totalBudget = maxInChars ?? defaultBudget;
+	const perFilterBudget = Math.max(MIN_IN_CHUNK_CHARS, Math.floor(totalBudget / inEntries.length));
+
+	const chunkedEntries: { filter: IRowFilter; chunks: unknown[][] }[] = [];
+
+	for (const entry of inEntries) {
+		if (entry.serializedLength > perFilterBudget) {
+			chunkedEntries.push({
+				filter: entry.filter,
+				chunks: chunkInFilterValues(entry.values, perFilterBudget),
+			});
+		} else {
+			// Fits within budget — no chunking needed
+			staticFilters.push(entry.filter);
+		}
+	}
+
+	if (chunkedEntries.length === 0) {
+		return [filters.map(f => {
+			// Return normalised IN entries (array values) alongside originals
+			const inEntry = inEntries.find(e => e.filter.column === f.column && f.operator === 'in');
+			return inEntry ? inEntry.filter : f;
+		})];
 	}
 
 	// Build Cartesian product of all chunk combinations

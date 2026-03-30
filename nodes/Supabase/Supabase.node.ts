@@ -902,6 +902,7 @@ export class Supabase implements INodeType {
 							supabase,
 							operation as DatabaseOperation,
 							itemIndex,
+							credentials.host,
 						);
 					} else if (resource === 'storage') {
 						operationResults = await executeStorageOperation.call(

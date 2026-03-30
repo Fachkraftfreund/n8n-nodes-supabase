@@ -13,6 +13,8 @@ import {
 	convertFilterOperator,
 	normalizeFilterValue,
 	expandChunkedFilters,
+	estimateUrlOverhead,
+	MAX_SAFE_URL_LENGTH,
 	formatSupabaseError,
 } from '../../utils/supabaseClient';
 
@@ -24,16 +26,17 @@ export async function executeDatabaseOperation(
 	supabase: SupabaseClient,
 	operation: DatabaseOperation,
 	itemIndex: number,
+	hostUrl: string,
 ): Promise<INodeExecutionData[]> {
 	const returnData: INodeExecutionData[] = [];
 
 	try {
 		switch (operation) {
 			case 'read':
-				returnData.push(...await handleRead.call(this, supabase, itemIndex));
+				returnData.push(...await handleRead.call(this, supabase, itemIndex, hostUrl));
 				break;
 			case 'delete':
-				returnData.push(...await handleDelete.call(this, supabase, itemIndex));
+				returnData.push(...await handleDelete.call(this, supabase, itemIndex, hostUrl));
 				break;
 			case 'createTable':
 				returnData.push(...await handleCreateTable.call(this, supabase, itemIndex));
@@ -289,6 +292,7 @@ async function handleRead(
 	this: IExecuteFunctions,
 	supabase: SupabaseClient,
 	itemIndex: number,
+	hostUrl: string,
 ): Promise<INodeExecutionData[]> {
 	const table = this.getNodeParameter('table', itemIndex) as string;
 	validateTableName(table);
@@ -297,7 +301,10 @@ async function handleRead(
 	const returnAll = this.getNodeParameter('returnAll', itemIndex, false) as boolean;
 	const filters = getFilters(this, itemIndex);
 	const sort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
-	const filterChunks = expandChunkedFilters(filters);
+
+	const overhead = estimateUrlOverhead(hostUrl, table, returnFields, filters, sort);
+	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
+	const filterChunks = expandChunkedFilters(filters, maxInChars);
 
 	const returnData: INodeExecutionData[] = [];
 
@@ -392,6 +399,7 @@ async function handleDelete(
 	this: IExecuteFunctions,
 	supabase: SupabaseClient,
 	itemIndex: number,
+	hostUrl: string,
 ): Promise<INodeExecutionData[]> {
 	const table = this.getNodeParameter('table', itemIndex) as string;
 
@@ -403,7 +411,9 @@ async function handleDelete(
 		throw new Error('At least one filter is required for delete operations to prevent accidental data loss');
 	}
 
-	const filterChunks = expandChunkedFilters(filters);
+	const overhead = estimateUrlOverhead(hostUrl, table, undefined, filters);
+	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
+	const filterChunks = expandChunkedFilters(filters, maxInChars);
 	const allDeleted: any[] = [];
 
 	for (const chunkFilters of filterChunks) {
