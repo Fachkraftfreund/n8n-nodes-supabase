@@ -301,16 +301,16 @@ async function handleRead(
 
 	const returnData: INodeExecutionData[] = [];
 
-	for (const chunkFilters of filterChunks) {
-		if (returnAll) {
+	if (returnAll) {
+		for (const chunkFilters of filterChunks) {
 			// Fetch all rows by paginating in batches
 			const batchSize = 1000;
-			let offset = 0;
+			let batchOffset = 0;
 			let hasMore = true;
 
 			while (hasMore) {
 				const batchQuery = buildReadQuery(supabase, table, returnFields, chunkFilters, sort, { count: 'exact' });
-				const { data: batchData, error: batchError } = await batchQuery.range(offset, offset + batchSize - 1);
+				const { data: batchData, error: batchError } = await batchQuery.range(batchOffset, batchOffset + batchSize - 1);
 
 				if (batchError) {
 					throw new Error(formatSupabaseError(batchError));
@@ -325,19 +325,27 @@ async function handleRead(
 					hasMore = false;
 				}
 
-				offset += batchSize;
+				batchOffset += batchSize;
 			}
-		} else {
-			const limit = this.getNodeParameter('limit', itemIndex, undefined) as number | undefined;
-			const offset = this.getNodeParameter('offset', itemIndex, undefined) as number | undefined;
+		}
+	} else {
+		const limit = this.getNodeParameter('limit', itemIndex, 100) as number;
+		const userOffset = this.getNodeParameter('offset', itemIndex, 0) as number;
+		const isMultiChunk = filterChunks.length > 1;
 
+		for (const chunkFilters of filterChunks) {
 			let query = buildReadQuery(supabase, table, returnFields, chunkFilters, sort);
 
-			if (limit !== undefined) {
-				query = query.limit(limit);
-			}
-			if (offset !== undefined) {
-				query = query.range(offset, offset + (limit || 1000) - 1);
+			if (isMultiChunk) {
+				// Multiple chunks: fetch enough per chunk so we can apply global offset+limit after merging
+				query = query.limit(userOffset + limit);
+			} else {
+				// Single chunk: apply offset and limit directly to the query
+				if (userOffset > 0) {
+					query = query.range(userOffset, userOffset + limit - 1);
+				} else {
+					query = query.limit(limit);
+				}
 			}
 
 			const { data, error } = await query;
@@ -351,6 +359,13 @@ async function handleRead(
 					returnData.push({ json: row });
 				}
 			}
+		}
+
+		// For multiple chunks, apply global offset and limit to the combined results
+		if (isMultiChunk && (userOffset > 0 || returnData.length > limit)) {
+			const sliced = returnData.slice(userOffset, userOffset + limit);
+			returnData.length = 0;
+			returnData.push(...sliced);
 		}
 	}
 

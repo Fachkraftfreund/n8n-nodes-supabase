@@ -251,12 +251,26 @@ export function expandChunkedFilters(filters: IRowFilter[]): IRowFilter[][] {
 	const chunkedEntries: { filter: IRowFilter; chunks: unknown[][] }[] = [];
 
 	for (const filter of filters) {
-		if (filter.operator === 'in' && Array.isArray(filter.value)) {
-			const serialized = (filter.value as unknown[]).map(String).join(',');
+		if (filter.operator === 'in') {
+			// Normalize the value to an array regardless of input type (string or array)
+			let values: unknown[];
+			if (Array.isArray(filter.value)) {
+				values = filter.value;
+			} else if (typeof filter.value === 'string') {
+				let str = filter.value.trim();
+				if (str.startsWith('(') && str.endsWith(')')) str = str.slice(1, -1);
+				if (str.startsWith('[') && str.endsWith(']')) str = str.slice(1, -1);
+				values = str.split(',').map(v => v.trim()).filter(v => v.length > 0);
+			} else {
+				staticFilters.push(filter);
+				continue;
+			}
+
+			const serialized = values.map(String).join(',');
 			if (serialized.length > IN_FILTER_MAX_CHAR_LENGTH) {
 				chunkedEntries.push({
-					filter,
-					chunks: chunkInFilterValues(filter.value as unknown[]),
+					filter: { ...filter, value: values },
+					chunks: chunkInFilterValues(values),
 				});
 				continue;
 			}
