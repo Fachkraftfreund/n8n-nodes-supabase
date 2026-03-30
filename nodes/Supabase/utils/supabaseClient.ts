@@ -215,6 +215,34 @@ export const MAX_SAFE_URL_LENGTH = 7500;
 const MIN_IN_CHUNK_CHARS = 500;
 
 /**
+ * Computes a per-chunk ID limit based on query complexity.
+ *
+ * PostgREST translates nested selects like `sector(id,name)` into JOINs.
+ * More JOINs means each row is far more expensive, so we scale the limit
+ * down as joins increase.  A plain `select=*` (0 joins) is capped only by
+ * URL length; 6 joins caps at ~200 IDs.
+ *
+ * Formula: 2000 / (1 + joinCount * 1.5)
+ *   0 joins → 2000 (URL-limited in practice)
+ *   1 join  → 800
+ *   2 joins → 500
+ *   3 joins → 363
+ *   6 joins → 200
+ */
+export function computeMaxIdsPerChunk(selectFields?: string): number {
+	const BASE_LIMIT = 2000;
+
+	if (!selectFields || selectFields === '*') return BASE_LIMIT;
+
+	// Count opening parens → each one is a relation/JOIN
+	const joinCount = (selectFields.match(/\(/g) || []).length;
+
+	if (joinCount === 0) return BASE_LIMIT;
+
+	return Math.max(100, Math.floor(BASE_LIMIT / (1 + joinCount * 1.5)));
+}
+
+/**
  * Estimates how many URL characters the non-IN-value parts of a PostgREST
  * query will consume.  The caller subtracts this from MAX_SAFE_URL_LENGTH
  * to obtain the budget available for IN filter values.
@@ -262,9 +290,14 @@ export function estimateUrlOverhead(
 
 /**
  * Splits an array of values into chunks where each chunk's comma-joined
- * string representation stays within `maxChars`.
+ * string representation stays within `maxChars` AND each chunk has at most
+ * `maxItems` entries (whichever limit is hit first).
  */
-export function chunkInFilterValues(values: unknown[], maxChars: number): unknown[][] {
+export function chunkInFilterValues(
+	values: unknown[],
+	maxChars: number,
+	maxItems: number = Infinity,
+): unknown[][] {
 	const chunks: unknown[][] = [];
 	let currentChunk: unknown[] = [];
 	let currentLength = 0;
@@ -273,7 +306,7 @@ export function chunkInFilterValues(values: unknown[], maxChars: number): unknow
 		const valueStr = String(value);
 		const addedLength = currentChunk.length === 0 ? valueStr.length : valueStr.length + 1;
 
-		if (currentLength + addedLength > maxChars && currentChunk.length > 0) {
+		if ((currentLength + addedLength > maxChars || currentChunk.length >= maxItems) && currentChunk.length > 0) {
 			chunks.push(currentChunk);
 			currentChunk = [value];
 			currentLength = valueStr.length;
@@ -299,10 +332,13 @@ export function chunkInFilterValues(values: unknown[], maxChars: number): unknow
  *                    When multiple IN filters need chunking the budget is
  *                    split equally among them.  Falls back to a safe default
  *                    when omitted (useful in non-read contexts like delete).
+ * @param maxItems    Maximum number of values per IN chunk (query-complexity
+ *                    cap).  Derived from `computeMaxIdsPerChunk()` by callers.
  */
 export function expandChunkedFilters(
 	filters: IRowFilter[],
 	maxInChars?: number,
+	maxItems?: number,
 ): IRowFilter[][] {
 	const staticFilters: IRowFilter[] = [];
 
@@ -345,11 +381,13 @@ export function expandChunkedFilters(
 
 	const chunkedEntries: { filter: IRowFilter; chunks: unknown[][] }[] = [];
 
+	const itemCap = maxItems ?? Infinity;
+
 	for (const entry of inEntries) {
-		if (entry.serializedLength > perFilterBudget) {
+		if (entry.serializedLength > perFilterBudget || entry.values.length > itemCap) {
 			chunkedEntries.push({
 				filter: entry.filter,
-				chunks: chunkInFilterValues(entry.values, perFilterBudget),
+				chunks: chunkInFilterValues(entry.values, perFilterBudget, itemCap),
 			});
 		} else {
 			// Fits within budget — no chunking needed

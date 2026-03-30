@@ -14,6 +14,7 @@ import {
 	normalizeFilterValue,
 	expandChunkedFilters,
 	estimateUrlOverhead,
+	computeMaxIdsPerChunk,
 	MAX_SAFE_URL_LENGTH,
 	formatSupabaseError,
 } from '../../utils/supabaseClient';
@@ -304,7 +305,8 @@ async function handleRead(
 
 	const overhead = estimateUrlOverhead(hostUrl, table, returnFields, filters, sort);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
-	const filterChunks = expandChunkedFilters(filters, maxInChars);
+	const maxItems = computeMaxIdsPerChunk(returnFields);
+	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
 
 	const returnData: INodeExecutionData[] = [];
 
