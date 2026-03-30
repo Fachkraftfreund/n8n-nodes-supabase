@@ -319,41 +319,59 @@ async function handleRead(
 
 	const returnData: INodeExecutionData[] = [];
 
-	if (returnAll) {
-		for (let ci = 0; ci < filterChunks.length; ci++) {
-			const chunkFilters = filterChunks[ci]!;
-			const inFilter = chunkFilters.find(f => f.operator === 'in');
-			const chunkIds = inFilter && Array.isArray(inFilter.value) ? (inFilter.value as unknown[]).length : '?';
-			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} (${chunkIds} IDs) - starting...`);
-			const chunkStart = Date.now();
+	// Helper: execute a single chunk's read query and return rows
+	async function executeChunk(
+		chunkFilters: IRowFilter[],
+		chunkIndex: number,
+		totalChunks: number,
+	): Promise<INodeExecutionData[]> {
+		const inFilter = chunkFilters.find(f => f.operator === 'in');
+		const chunkIds = inFilter && Array.isArray(inFilter.value) ? (inFilter.value as unknown[]).length : '?';
+		console.log(`[Supabase READ] chunk ${chunkIndex + 1}/${totalChunks} (${chunkIds} IDs) - starting...`);
+		const chunkStart = Date.now();
+		const rows: INodeExecutionData[] = [];
 
-			// Fetch all rows by paginating in batches
-			const batchSize = 1000;
-			let batchOffset = 0;
-			let hasMore = true;
+		const batchSize = 1000;
+		let batchOffset = 0;
+		let hasMore = true;
 
-			while (hasMore) {
-				const batchQuery = buildReadQuery(supabase, table, returnFields, chunkFilters, sort, { count: 'exact' });
-				const { data: batchData, error: batchError } = await batchQuery.range(batchOffset, batchOffset + batchSize - 1);
+		while (hasMore) {
+			// No { count: 'exact' } — avoids an expensive COUNT(*) with JOINs
+			const batchQuery = buildReadQuery(supabase, table, returnFields, chunkFilters, sort);
+			const { data: batchData, error: batchError } = await batchQuery.range(batchOffset, batchOffset + batchSize - 1);
 
-				if (batchError) {
-					console.log(`[Supabase READ] chunk ${ci + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(batchError)}`);
-					throw new Error(formatSupabaseError(batchError));
-				}
-
-				if (Array.isArray(batchData)) {
-					for (const row of batchData) {
-						returnData.push({ json: row });
-					}
-					hasMore = batchData.length === batchSize;
-				} else {
-					hasMore = false;
-				}
-
-				batchOffset += batchSize;
+			if (batchError) {
+				console.log(`[Supabase READ] chunk ${chunkIndex + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(batchError)}`);
+				throw new Error(formatSupabaseError(batchError));
 			}
 
-			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} done in ${Date.now() - chunkStart}ms, rows so far: ${returnData.length}`);
+			if (Array.isArray(batchData)) {
+				for (const row of batchData) {
+					rows.push({ json: row });
+				}
+				hasMore = batchData.length === batchSize;
+			} else {
+				hasMore = false;
+			}
+
+			batchOffset += batchSize;
+		}
+
+		console.log(`[Supabase READ] chunk ${chunkIndex + 1}/${totalChunks} done in ${Date.now() - chunkStart}ms, rows: ${rows.length}`);
+		return rows;
+	}
+
+	if (returnAll) {
+		// Run chunks in parallel batches of CONCURRENCY to speed up large IN queries
+		const CONCURRENCY = 3;
+		for (let i = 0; i < filterChunks.length; i += CONCURRENCY) {
+			const batch = filterChunks.slice(i, i + CONCURRENCY);
+			const results = await Promise.all(
+				batch.map((chunkFilters, j) => executeChunk(chunkFilters, i + j, filterChunks.length)),
+			);
+			for (const rows of results) {
+				returnData.push(...rows);
+			}
 		}
 	} else {
 		const limit = this.getNodeParameter('limit', itemIndex, 100) as number;

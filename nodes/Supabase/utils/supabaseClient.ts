@@ -5,12 +5,19 @@ import { ISupabaseCredentials, IRowFilter, IRowSort } from '../types';
  * Creates a Supabase client instance with the provided credentials
  */
 export function createSupabaseClient(credentials: ISupabaseCredentials): SupabaseClient {
-	// Create client with minimal options to avoid deep type instantiation
 	const client = createClient(credentials.host, credentials.serviceKey, {
 		auth: {
 			autoRefreshToken: true,
 			persistSession: false,
 			detectSessionInUrl: false,
+		},
+		global: {
+			fetch: (url: RequestInfo | URL, init?: RequestInit) => {
+				// 60-second timeout prevents requests from hanging indefinitely
+				const controller = new AbortController();
+				const timeout = setTimeout(() => controller.abort(), 60_000);
+				return fetch(url, { ...init, signal: controller.signal }).finally(() => clearTimeout(timeout));
+			},
 		},
 	});
 
