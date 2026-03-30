@@ -891,8 +891,27 @@ export class Supabase implements INodeType {
 					throw new NodeOperationError(this.getNode(), errorMessage);
 				}
 			}
+		} else if (resource === 'database' && operation === 'read') {
+			// Read operations execute once (first item), not per-item
+			try {
+				const operationResults = await executeDatabaseOperation.call(
+					this,
+					supabase,
+					operation as DatabaseOperation,
+					0,
+					credentials.host,
+				);
+				returnData.push(...operationResults);
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+				if (this.continueOnFail()) {
+					returnData.push({ json: { error: errorMessage } });
+				} else {
+					throw new NodeOperationError(this.getNode(), errorMessage);
+				}
+			}
 		} else {
-			// Per-item processing for all other operations
+			// Per-item processing for delete, schema ops, storage, etc.
 			for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 				try {
 					let operationResults: INodeExecutionData[] = [];
