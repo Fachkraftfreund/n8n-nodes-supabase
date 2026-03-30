@@ -844,6 +844,7 @@ export class Supabase implements INodeType {
 	async execute(this: IExecuteFunctions): Promise<INodeExecutionData[][]> {
 		const items = this.getInputData();
 		const returnData: INodeExecutionData[] = [];
+		console.log(`[Supabase] execute: ${items.length} input items`);
 
 		// Get credentials
 		const credentials = await this.getCredentials('supabaseExtendedApi') as unknown as ISupabaseCredentials;

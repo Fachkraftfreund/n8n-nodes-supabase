@@ -303,15 +303,30 @@ async function handleRead(
 	const filters = getFilters(this, itemIndex);
 	const sort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
 
+	// Debug: log filter details so we can diagnose chunking issues
+	for (const f of filters) {
+		const valType = Array.isArray(f.value) ? `array[${(f.value as unknown[]).length}]` : typeof f.value;
+		const valLen = typeof f.value === 'string' ? f.value.length : Array.isArray(f.value) ? (f.value as unknown[]).length : 0;
+		console.log(`[Supabase READ] item=${itemIndex} filter: ${f.column} ${f.operator} (${valType}, len=${valLen})`);
+	}
+
 	const overhead = estimateUrlOverhead(hostUrl, table, returnFields, filters, sort);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
 	const maxItems = computeMaxIdsPerChunk(returnFields);
 	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
 
+	console.log(`[Supabase READ] item=${itemIndex} table=${table} returnAll=${returnAll} chunks=${filterChunks.length} maxItems=${maxItems} maxInChars=${maxInChars}`);
+
 	const returnData: INodeExecutionData[] = [];
 
 	if (returnAll) {
-		for (const chunkFilters of filterChunks) {
+		for (let ci = 0; ci < filterChunks.length; ci++) {
+			const chunkFilters = filterChunks[ci]!;
+			const inFilter = chunkFilters.find(f => f.operator === 'in');
+			const chunkIds = inFilter && Array.isArray(inFilter.value) ? (inFilter.value as unknown[]).length : '?';
+			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} (${chunkIds} IDs) - starting...`);
+			const chunkStart = Date.now();
+
 			// Fetch all rows by paginating in batches
 			const batchSize = 1000;
 			let batchOffset = 0;
@@ -322,6 +337,7 @@ async function handleRead(
 				const { data: batchData, error: batchError } = await batchQuery.range(batchOffset, batchOffset + batchSize - 1);
 
 				if (batchError) {
+					console.log(`[Supabase READ] chunk ${ci + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(batchError)}`);
 					throw new Error(formatSupabaseError(batchError));
 				}
 
@@ -336,6 +352,8 @@ async function handleRead(
 
 				batchOffset += batchSize;
 			}
+
+			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} done in ${Date.now() - chunkStart}ms, rows so far: ${returnData.length}`);
 		}
 	} else {
 		const limit = this.getNodeParameter('limit', itemIndex, 100) as number;
