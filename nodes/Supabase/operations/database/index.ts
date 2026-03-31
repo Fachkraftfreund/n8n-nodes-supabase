@@ -302,8 +302,21 @@ async function handleRead(
 
 	const returnFields = this.getNodeParameter('returnFields', itemIndex, '*') as string;
 	const returnAll = this.getNodeParameter('returnAll', itemIndex, false) as boolean;
+	const singleItem = this.getNodeParameter('singleItem', itemIndex, false) as boolean;
 	const filters = getFilters(this, itemIndex);
 	const sort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
+
+	// Build join fragments from the Joins UI and append to the select string
+	const joins = this.getNodeParameter('joins.join', itemIndex, []) as Array<{
+		table: string; columns: string; joinType: string;
+	}>;
+	let selectWithJoins = returnFields;
+	for (const j of joins) {
+		if (!j.table) continue;
+		const cols = j.columns || '*';
+		const hint = j.joinType === 'inner' ? `${j.table}!inner` : j.table;
+		selectWithJoins += `,${hint}(${cols})`;
+	}
 
 	// Debug: log filter details so we can diagnose chunking issues
 	for (const f of filters) {
@@ -312,9 +325,9 @@ async function handleRead(
 		console.log(`[Supabase READ] item=${itemIndex} filter: ${f.column} ${f.operator} (${valType}, len=${valLen})`);
 	}
 
-	const overhead = estimateUrlOverhead(hostUrl, table, returnFields, filters, sort);
+	const overhead = estimateUrlOverhead(hostUrl, table, selectWithJoins, filters, sort);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
-	const maxItems = computeMaxIdsPerChunk(returnFields);
+	const maxItems = computeMaxIdsPerChunk(selectWithJoins);
 	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
 
 	console.log(`[Supabase READ] item=${itemIndex} table=${table} returnAll=${returnAll} chunks=${filterChunks.length} maxItems=${maxItems} maxInChars=${maxInChars}`);
@@ -341,7 +354,7 @@ async function handleRead(
 				let lastId: number | string | null = null;
 
 				while (hasMore) {
-					let query = buildReadQuery(supabase, table, returnFields, chunkFilters, []);
+					let query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, []);
 					if (lastId !== null) {
 						query = query.gt('id', lastId);
 					}
@@ -370,7 +383,7 @@ async function handleRead(
 				let batchOffset = 0;
 
 				while (hasMore) {
-					const query = buildReadQuery(supabase, table, returnFields, chunkFilters, sort);
+					const query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, sort);
 					const { data, error } = await query.range(batchOffset, batchOffset + batchSize - 1);
 					if (error) {
 						console.log(`[Supabase READ] chunk ${ci + 1} batch ${batchCount + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(error)}`);
@@ -415,7 +428,7 @@ async function handleRead(
 		const isMultiChunk = filterChunks.length > 1;
 
 		for (const chunkFilters of filterChunks) {
-			let query = buildReadQuery(supabase, table, returnFields, chunkFilters, sort);
+			let query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, sort);
 
 			if (isMultiChunk) {
 				// Multiple chunks: fetch enough per chunk so we can apply global offset+limit after merging
@@ -464,10 +477,14 @@ async function handleRead(
 	}
 
 	// Wrap all rows into a single n8n item if requested
-	const singleItem = this.getNodeParameter('singleItem', itemIndex, false) as boolean;
 	if (singleItem && returnData.length > 0) {
-		const allRows = returnData.map(item => item.json);
-		return [{ json: { data: allRows, count: allRows.length } }];
+		const count = returnData.length;
+		// Reuse .json references — no copy needed
+		const allRows = new Array(count);
+		for (let i = 0; i < count; i++) allRows[i] = returnData[i]!.json;
+		// Release the item wrappers so GC can reclaim them
+		returnData.length = 0;
+		return [{ json: { data: allRows, count } }];
 	}
 
 	return returnData;

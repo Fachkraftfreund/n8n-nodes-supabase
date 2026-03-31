@@ -563,6 +563,60 @@ export class Supabase implements INodeType {
 				},
 			},
 
+			// Joins
+			{
+				displayName: 'Joins',
+				name: 'joins',
+				type: 'fixedCollection',
+				typeOptions: {
+					multipleValues: true,
+				},
+				default: {},
+				placeholder: 'Add Join',
+				description: 'Join related tables via foreign keys (PostgREST resource embedding)',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['read'],
+					},
+				},
+				options: [
+					{
+						displayName: 'Join',
+						name: 'join',
+						values: [
+							{
+								displayName: 'Table',
+								name: 'table',
+								type: 'string',
+								default: '',
+								placeholder: 'company_email',
+								description: 'Related table to join',
+							},
+							{
+								displayName: 'Columns',
+								name: 'columns',
+								type: 'string',
+								default: '*',
+								placeholder: 'email,verified',
+								description: 'Comma-separated columns to select from the joined table (* for all)',
+							},
+							{
+								displayName: 'Join Type',
+								name: 'joinType',
+								type: 'options',
+								options: [
+									{ name: 'Left Join', value: 'left' },
+									{ name: 'Inner Join', value: 'inner' },
+								],
+								default: 'left',
+								description: 'Left returns all rows even without a match; Inner only returns rows with a match',
+							},
+						],
+					},
+				],
+			},
+
 			// Sorting
 			{
 				displayName: 'Sort',
