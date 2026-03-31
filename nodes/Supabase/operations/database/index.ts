@@ -322,58 +322,80 @@ async function handleRead(
 	const returnData: INodeExecutionData[] = [];
 
 	if (returnAll) {
-		// Use keyset (cursor) pagination: WHERE id > lastId ORDER BY id
-		// This is O(1) per batch vs OFFSET which is O(n) and gets slower with each page.
 		const batchSize = 1000;
+		// Check if select includes 'id' — if so use fast keyset pagination, otherwise OFFSET
+		const selectFields = returnFields && returnFields !== '*' ? returnFields : '*';
+		const hasIdColumn = selectFields === '*' || selectFields.split(',').some(f => f.trim() === 'id');
 
 		for (let ci = 0; ci < filterChunks.length; ci++) {
 			const chunkFilters = filterChunks[ci]!;
 			const inFilter = chunkFilters.find(f => f.operator === 'in');
 			const chunkIds = inFilter && Array.isArray(inFilter.value) ? (inFilter.value as unknown[]).length : '?';
-			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} (${chunkIds} IDs) - starting...`);
+			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} (${chunkIds} IDs) keyset=${hasIdColumn} - starting...`);
 			const chunkStart = Date.now();
-
-			let lastId: number | string | null = null;
-			let hasMore = true;
 			let batchCount = 0;
+			let hasMore = true;
 
-			while (hasMore) {
-				// Build query WITHOUT user sort — we use id ordering for keyset pagination
-				let query = buildReadQuery(supabase, table, returnFields, chunkFilters, []);
+			if (hasIdColumn) {
+				// Keyset pagination: WHERE id > lastId ORDER BY id — O(1) per batch
+				let lastId: number | string | null = null;
 
-				if (lastId !== null) {
-					query = query.gt('id', lastId);
-				}
-				query = query.order('id', { ascending: true }).limit(batchSize);
-
-				const { data, error } = await query;
-
-				if (error) {
-					console.log(`[Supabase READ] chunk ${ci + 1} batch ${batchCount + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(error)}`);
-					throw new Error(formatSupabaseError(error));
-				}
-
-				if (Array.isArray(data) && data.length > 0) {
-					for (const row of data) {
-						returnData.push({ json: row });
+				while (hasMore) {
+					let query = buildReadQuery(supabase, table, returnFields, chunkFilters, []);
+					if (lastId !== null) {
+						query = query.gt('id', lastId);
 					}
-					lastId = data[data.length - 1].id;
-					hasMore = data.length === batchSize;
-				} else {
-					hasMore = false;
-				}
+					query = query.order('id', { ascending: true }).limit(batchSize);
 
-				batchCount++;
-				if (batchCount % 50 === 0) {
-					console.log(`[Supabase READ] chunk ${ci + 1} progress: ${batchCount} batches, ${returnData.length} rows, ${Date.now() - chunkStart}ms`);
+					const { data, error } = await query;
+					if (error) {
+						console.log(`[Supabase READ] chunk ${ci + 1} batch ${batchCount + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(error)}`);
+						throw new Error(formatSupabaseError(error));
+					}
+
+					if (Array.isArray(data) && data.length > 0) {
+						for (const row of data) returnData.push({ json: row });
+						lastId = data[data.length - 1].id;
+						hasMore = data.length === batchSize;
+					} else {
+						hasMore = false;
+					}
+					batchCount++;
+					if (batchCount % 50 === 0) {
+						console.log(`[Supabase READ] chunk ${ci + 1} progress: ${batchCount} batches, ${returnData.length} rows, ${Date.now() - chunkStart}ms`);
+					}
+				}
+			} else {
+				// OFFSET pagination fallback for tables without an id column
+				let batchOffset = 0;
+
+				while (hasMore) {
+					const query = buildReadQuery(supabase, table, returnFields, chunkFilters, sort);
+					const { data, error } = await query.range(batchOffset, batchOffset + batchSize - 1);
+					if (error) {
+						console.log(`[Supabase READ] chunk ${ci + 1} batch ${batchCount + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(error)}`);
+						throw new Error(formatSupabaseError(error));
+					}
+
+					if (Array.isArray(data) && data.length > 0) {
+						for (const row of data) returnData.push({ json: row });
+						hasMore = data.length === batchSize;
+					} else {
+						hasMore = false;
+					}
+					batchOffset += batchSize;
+					batchCount++;
+					if (batchCount % 50 === 0) {
+						console.log(`[Supabase READ] chunk ${ci + 1} progress: ${batchCount} batches, ${returnData.length} rows, ${Date.now() - chunkStart}ms`);
+					}
 				}
 			}
 
 			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} done in ${Date.now() - chunkStart}ms — ${batchCount} batches, ${returnData.length} total rows`);
 		}
 
-		// Apply user's sort to the combined results (keyset pagination uses id ordering)
-		if (sort.length > 0) {
+		// Apply user's sort when keyset pagination was used (it overrides user sort with id ordering)
+		if (hasIdColumn && sort.length > 0) {
 			returnData.sort((a, b) => {
 				for (const s of sort) {
 					const aVal = a.json[s.column] ?? null;
