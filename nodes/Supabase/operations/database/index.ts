@@ -319,59 +319,71 @@ async function handleRead(
 
 	const returnData: INodeExecutionData[] = [];
 
-	// Helper: execute a single chunk's read query and return rows
-	async function executeChunk(
-		chunkFilters: IRowFilter[],
-		chunkIndex: number,
-		totalChunks: number,
-	): Promise<INodeExecutionData[]> {
-		const inFilter = chunkFilters.find(f => f.operator === 'in');
-		const chunkIds = inFilter && Array.isArray(inFilter.value) ? (inFilter.value as unknown[]).length : '?';
-		console.log(`[Supabase READ] chunk ${chunkIndex + 1}/${totalChunks} (${chunkIds} IDs) - starting...`);
-		const chunkStart = Date.now();
-		const rows: INodeExecutionData[] = [];
-
+	if (returnAll) {
+		// Use keyset (cursor) pagination: WHERE id > lastId ORDER BY id
+		// This is O(1) per batch vs OFFSET which is O(n) and gets slower with each page.
 		const batchSize = 1000;
-		let batchOffset = 0;
-		let hasMore = true;
 
-		while (hasMore) {
-			// No { count: 'exact' } — avoids an expensive COUNT(*) with JOINs
-			const batchQuery = buildReadQuery(supabase, table, returnFields, chunkFilters, sort);
-			const { data: batchData, error: batchError } = await batchQuery.range(batchOffset, batchOffset + batchSize - 1);
+		for (let ci = 0; ci < filterChunks.length; ci++) {
+			const chunkFilters = filterChunks[ci]!;
+			const inFilter = chunkFilters.find(f => f.operator === 'in');
+			const chunkIds = inFilter && Array.isArray(inFilter.value) ? (inFilter.value as unknown[]).length : '?';
+			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} (${chunkIds} IDs) - starting...`);
+			const chunkStart = Date.now();
 
-			if (batchError) {
-				console.log(`[Supabase READ] chunk ${chunkIndex + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(batchError)}`);
-				throw new Error(formatSupabaseError(batchError));
-			}
+			let lastId: number | string | null = null;
+			let hasMore = true;
+			let batchCount = 0;
 
-			if (Array.isArray(batchData)) {
-				for (const row of batchData) {
-					rows.push({ json: row });
+			while (hasMore) {
+				// Build query WITHOUT user sort — we use id ordering for keyset pagination
+				let query = buildReadQuery(supabase, table, returnFields, chunkFilters, []);
+
+				if (lastId !== null) {
+					query = query.gt('id', lastId);
 				}
-				hasMore = batchData.length === batchSize;
-			} else {
-				hasMore = false;
+				query = query.order('id', { ascending: true }).limit(batchSize);
+
+				const { data, error } = await query;
+
+				if (error) {
+					console.log(`[Supabase READ] chunk ${ci + 1} batch ${batchCount + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(error)}`);
+					throw new Error(formatSupabaseError(error));
+				}
+
+				if (Array.isArray(data) && data.length > 0) {
+					for (const row of data) {
+						returnData.push({ json: row });
+					}
+					lastId = data[data.length - 1].id;
+					hasMore = data.length === batchSize;
+				} else {
+					hasMore = false;
+				}
+
+				batchCount++;
+				if (batchCount % 50 === 0) {
+					console.log(`[Supabase READ] chunk ${ci + 1} progress: ${batchCount} batches, ${returnData.length} rows, ${Date.now() - chunkStart}ms`);
+				}
 			}
 
-			batchOffset += batchSize;
+			console.log(`[Supabase READ] chunk ${ci + 1}/${filterChunks.length} done in ${Date.now() - chunkStart}ms — ${batchCount} batches, ${returnData.length} total rows`);
 		}
 
-		console.log(`[Supabase READ] chunk ${chunkIndex + 1}/${totalChunks} done in ${Date.now() - chunkStart}ms, rows: ${rows.length}`);
-		return rows;
-	}
-
-	if (returnAll) {
-		// Run chunks in parallel batches of CONCURRENCY to speed up large IN queries
-		const CONCURRENCY = 3;
-		for (let i = 0; i < filterChunks.length; i += CONCURRENCY) {
-			const batch = filterChunks.slice(i, i + CONCURRENCY);
-			const results = await Promise.all(
-				batch.map((chunkFilters, j) => executeChunk(chunkFilters, i + j, filterChunks.length)),
-			);
-			for (const rows of results) {
-				returnData.push(...rows);
-			}
+		// Apply user's sort to the combined results (keyset pagination uses id ordering)
+		if (sort.length > 0) {
+			returnData.sort((a, b) => {
+				for (const s of sort) {
+					const aVal = a.json[s.column] ?? null;
+					const bVal = b.json[s.column] ?? null;
+					if (aVal === bVal) continue;
+					if (aVal === null) return 1;
+					if (bVal === null) return -1;
+					if (aVal < bVal) return s.ascending ? -1 : 1;
+					if (aVal > bVal) return s.ascending ? 1 : -1;
+				}
+				return 0;
+			});
 		}
 	} else {
 		const limit = this.getNodeParameter('limit', itemIndex, 100) as number;
