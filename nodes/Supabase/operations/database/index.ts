@@ -463,6 +463,13 @@ async function handleRead(
 		});
 	}
 
+	// Wrap all rows into a single n8n item if requested
+	const singleItem = this.getNodeParameter('singleItem', itemIndex, false) as boolean;
+	if (singleItem && returnData.length > 0) {
+		const allRows = returnData.map(item => item.json);
+		return [{ json: { data: allRows, count: allRows.length } }];
+	}
+
 	return returnData;
 }
 

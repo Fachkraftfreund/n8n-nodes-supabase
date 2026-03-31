@@ -648,6 +648,19 @@ export class Supabase implements INodeType {
 					},
 				},
 			},
+			{
+				displayName: 'Single Result Item',
+				name: 'singleItem',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to return all rows wrapped in a single n8n item (as a "data" array) instead of one item per row',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['read'],
+					},
+				},
+			},
 
 			// Storage Bucket Name
 			{

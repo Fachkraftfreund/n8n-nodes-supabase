@@ -1,6 +1,6 @@
 {
   "name": "@fachkraftfreund/n8n-nodes-supabase",
-  "version": "1.2.21",
+  "version": "1.2.22",
   "description": "Comprehensive n8n community node for Supabase with database and storage operations",
   "keywords": [
     "n8n-community-node-package",
