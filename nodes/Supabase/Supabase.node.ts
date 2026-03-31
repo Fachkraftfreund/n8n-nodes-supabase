@@ -882,7 +882,7 @@ export class Supabase implements INodeType {
 					operation as DatabaseOperation,
 					items.length,
 				);
-				returnData.push(...results);
+				for (const r of results) returnData.push(r);
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
 				if (this.continueOnFail()) {
@@ -901,7 +901,7 @@ export class Supabase implements INodeType {
 					0,
 					credentials.host,
 				);
-				returnData.push(...operationResults);
+				for (const r of operationResults) returnData.push(r);
 			} catch (error) {
 				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
 				if (this.continueOnFail()) {
@@ -935,7 +935,7 @@ export class Supabase implements INodeType {
 						throw new NodeOperationError(this.getNode(), `Unknown resource: ${resource}`);
 					}
 
-					returnData.push(...operationResults);
+					for (const r of operationResults) returnData.push(r);
 
 				} catch (error) {
 					const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';

@@ -33,9 +33,11 @@ export async function executeDatabaseOperation(
 
 	try {
 		switch (operation) {
-			case 'read':
-				returnData.push(...await handleRead.call(this, supabase, itemIndex, hostUrl));
+			case 'read': {
+				const rows = await handleRead.call(this, supabase, itemIndex, hostUrl);
+				for (const r of rows) returnData.push(r);
 				break;
+			}
 			case 'delete':
 				returnData.push(...await handleDelete.call(this, supabase, itemIndex, hostUrl));
 				break;
@@ -422,7 +424,7 @@ async function handleRead(
 		if (isMultiChunk && (userOffset > 0 || returnData.length > limit)) {
 			const sliced = returnData.slice(userOffset, userOffset + limit);
 			returnData.length = 0;
-			returnData.push(...sliced);
+			for (const r of sliced) returnData.push(r);
 		}
 	}
 
