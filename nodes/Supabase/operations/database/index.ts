@@ -78,6 +78,41 @@ export async function executeDatabaseOperation(
 /**
  * Collect row data from all input items
  */
+/**
+ * Sanitize a string value for Postgres: strips null bytes, unicode escape
+ * sequences, and stray backslashes that cause "unsupported Unicode escape
+ * sequence" errors.
+ */
+function sanitizeString(value: string): string {
+	return value
+		.replace(/\x00/g, '')                // null bytes
+		.replace(/\\u[0-9a-fA-F]{4}/g, '')   // unicode escape sequences
+		.replace(/\\/g, '');                  // stray backslashes
+}
+
+/**
+ * Recursively sanitize all string values in an object or array.
+ */
+function sanitizeRow(obj: IDataObject): IDataObject {
+	for (const key of Object.keys(obj)) {
+		const val = obj[key];
+		if (typeof val === 'string') {
+			obj[key] = sanitizeString(val);
+		} else if (Array.isArray(val)) {
+			for (let i = 0; i < val.length; i++) {
+				if (typeof val[i] === 'string') {
+					val[i] = sanitizeString(val[i] as string);
+				} else if (val[i] && typeof val[i] === 'object') {
+					sanitizeRow(val[i] as IDataObject);
+				}
+			}
+		} else if (val && typeof val === 'object') {
+			sanitizeRow(val as IDataObject);
+		}
+	}
+	return obj;
+}
+
 function collectRowData(
 	context: IExecuteFunctions,
 	itemCount: number,
@@ -106,7 +141,7 @@ function collectRowData(
 				}
 			}
 		}
-		rows.push(row);
+		rows.push(sanitizeRow(row));
 	}
 	return rows;
 }
