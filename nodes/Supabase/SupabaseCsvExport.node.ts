@@ -141,12 +141,8 @@ function parseFilters(context: IExecuteFunctions, itemIndex: number): IRowFilter
 const BATCH_SIZE = 1000;
 
 /**
- * Yields rows in batches of ~1000.  The caller decides whether to
- * accumulate them (transform path) or stream them (no-transform path).
- *
- * @param preferOffset  When true, always uses OFFSET pagination even if
- *   an `id` column is present.  This preserves DB-level sort order so
- *   the caller can stream batches directly without a post-fetch re-sort.
+ * Yields rows in batches of ~1000 using keyset pagination (O(1) per batch)
+ * when an `id` column is available, falling back to OFFSET only when it isn't.
  */
 async function* fetchBatches(
 	supabase: SupabaseClient,
@@ -157,27 +153,31 @@ async function* fetchBatches(
 	hostUrl: string,
 	returnAll: boolean,
 	limit: number,
-	preferOffset: boolean,
 ): AsyncGenerator<Record<string, unknown>[]> {
 	const overhead = estimateUrlOverhead(hostUrl, table, selectFields, filters, sort);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
 	const maxItems = computeMaxIdsPerChunk(selectFields);
 	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
 
+	const hasIdColumn =
+		selectFields === '*' || selectFields.split(',').some((f) => f.trim() === 'id');
+
 	let totalYielded = 0;
 	const maxRows = returnAll ? Infinity : limit;
+	const startTime = Date.now();
 
-	for (const chunkFilters of filterChunks) {
+	console.log(`[Supabase CSV] starting export table=${table} returnAll=${returnAll} chunks=${filterChunks.length} keyset=${hasIdColumn}`);
+
+	for (let ci = 0; ci < filterChunks.length; ci++) {
+		const chunkFilters = filterChunks[ci]!;
 		if (totalYielded >= maxRows) break;
 
 		if (returnAll) {
-			const useKeyset =
-				!preferOffset &&
-				(selectFields === '*' || selectFields.split(',').some((f) => f.trim() === 'id'));
-
 			let hasMore = true;
+			let batchNum = 0;
 
-			if (useKeyset) {
+			if (hasIdColumn) {
+				// Keyset pagination — O(1) per batch regardless of offset
 				let lastId: number | string | null = null;
 
 				while (hasMore) {
@@ -196,9 +196,15 @@ async function* fetchBatches(
 					} else {
 						hasMore = false;
 					}
+
+					batchNum++;
+					if (batchNum % 50 === 0) {
+						const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+						console.log(`[Supabase CSV] chunk ${ci + 1}/${filterChunks.length} batch ${batchNum} — ${totalYielded} rows fetched (${elapsed}s)`);
+					}
 				}
 			} else {
-				// OFFSET pagination — preserves DB sort order
+				// OFFSET fallback — only for tables without id column
 				let offset = 0;
 
 				while (hasMore) {
@@ -216,6 +222,12 @@ async function* fetchBatches(
 						hasMore = false;
 					}
 					offset += BATCH_SIZE;
+
+					batchNum++;
+					if (batchNum % 50 === 0) {
+						const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+						console.log(`[Supabase CSV] chunk ${ci + 1}/${filterChunks.length} batch ${batchNum} (offset) — ${totalYielded} rows fetched (${elapsed}s)`);
+					}
 				}
 			}
 		} else {
@@ -233,6 +245,9 @@ async function* fetchBatches(
 			}
 		}
 	}
+
+	const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+	console.log(`[Supabase CSV] fetch complete — ${totalYielded} rows in ${elapsed}s`);
 }
 
 // ── Node definition ────────────────────────────────────────────────────
@@ -734,14 +749,9 @@ export class SupabaseCsvExport implements INodeType {
 				}
 			}
 
-			// When the user has a sort order, prefer OFFSET pagination
-			// so the DB preserves ordering across batches.
-			const preferOffset = sort.length > 0;
-
 			for await (const batch of fetchBatches(
 				supabase, table, selectWithJoins, filters, sort,
 				credentials.host, returnAll, limit,
-				preferOffset,
 			)) {
 				// Apply per-batch transform
 				let rows = batch;
