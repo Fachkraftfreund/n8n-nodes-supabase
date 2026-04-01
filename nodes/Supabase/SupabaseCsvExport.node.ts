@@ -31,6 +31,10 @@ interface CsvOptions {
 	fileName: string;
 }
 
+function escapeRegExp(s: string): string {
+	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function escapeCsvField(value: unknown, delimiter: string, quoteChar: string): string {
 	if (value === null || value === undefined) return '';
 	const str = typeof value === 'object' ? JSON.stringify(value) : String(value);
@@ -40,41 +44,45 @@ function escapeCsvField(value: unknown, delimiter: string, quoteChar: string): s
 		str.includes('\n') ||
 		str.includes('\r')
 	) {
-		return quoteChar + str.replace(new RegExp(escapeRegExp(quoteChar), 'g'), quoteChar + quoteChar) + quoteChar;
+		const escaped = quoteChar + str.replace(new RegExp(escapeRegExp(quoteChar), 'g'), quoteChar + quoteChar) + quoteChar;
+		return escaped;
 	}
 	return str;
 }
 
-function escapeRegExp(s: string): string {
-	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+/**
+ * Collect all unique keys from a set of rows, preserving first-seen order.
+ */
+function discoverHeaders(rows: Record<string, unknown>[]): string[] {
+	const set = new Set<string>();
+	for (const row of rows) {
+		for (const key of Object.keys(row)) set.add(key);
+	}
+	return [...set];
 }
 
-function generateCsv(rows: Record<string, unknown>[], options: CsvOptions): string {
-	if (rows.length === 0) return '';
-
-	const { delimiter, quoteChar, includeHeaders } = options;
-
-	// Collect all unique keys preserving first-seen order
-	const headerSet = new Set<string>();
-	for (const row of rows) {
-		for (const key of Object.keys(row)) headerSet.add(key);
+/**
+ * Convert a batch of rows to a single UTF-8 Buffer of CSV lines.
+ * Does NOT include a trailing newline after the last line — the caller
+ * controls newline placement between chunks.
+ */
+function batchToCsvBuffer(
+	rows: Record<string, unknown>[],
+	headers: string[],
+	delimiter: string,
+	quoteChar: string,
+): Buffer {
+	const lines = new Array<string>(rows.length);
+	for (let i = 0; i < rows.length; i++) {
+		const row = rows[i]!;
+		lines[i] = headers
+			.map((h) => escapeCsvField(row[h], delimiter, quoteChar))
+			.join(delimiter);
 	}
-	const headers = [...headerSet];
-
-	const lines: string[] = [];
-	if (includeHeaders) {
-		lines.push(headers.map((h) => escapeCsvField(h, delimiter, quoteChar)).join(delimiter));
-	}
-	for (const row of rows) {
-		lines.push(
-			headers.map((h) => escapeCsvField(row[h], delimiter, quoteChar)).join(delimiter),
-		);
-	}
-
-	return lines.join('\n');
+	return Buffer.from(lines.join('\n'), 'utf-8');
 }
 
-// ── Query helpers (mirrors read operation logic) ───────────────────────
+// ── Query helpers ──────────────────────────────────────────────────────
 
 function buildSelectQuery(
 	supabase: SupabaseClient,
@@ -128,9 +136,19 @@ function parseFilters(context: IExecuteFunctions, itemIndex: number): IRowFilter
 	}
 }
 
-// ── Paginated fetch ────────────────────────────────────────────────────
+// ── Batched fetch (async generator) ────────────────────────────────────
 
-async function fetchAllRows(
+const BATCH_SIZE = 1000;
+
+/**
+ * Yields rows in batches of ~1000.  The caller decides whether to
+ * accumulate them (transform path) or stream them (no-transform path).
+ *
+ * @param preferOffset  When true, always uses OFFSET pagination even if
+ *   an `id` column is present.  This preserves DB-level sort order so
+ *   the caller can stream batches directly without a post-fetch re-sort.
+ */
+async function* fetchBatches(
 	supabase: SupabaseClient,
 	table: string,
 	selectFields: string,
@@ -139,97 +157,82 @@ async function fetchAllRows(
 	hostUrl: string,
 	returnAll: boolean,
 	limit: number,
-): Promise<Record<string, unknown>[]> {
+	preferOffset: boolean,
+): AsyncGenerator<Record<string, unknown>[]> {
 	const overhead = estimateUrlOverhead(hostUrl, table, selectFields, filters, sort);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
 	const maxItems = computeMaxIdsPerChunk(selectFields);
 	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
 
-	const allRows: Record<string, unknown>[] = [];
+	let totalYielded = 0;
+	const maxRows = returnAll ? Infinity : limit;
 
-	if (returnAll) {
-		const batchSize = 1000;
-		const hasIdColumn =
-			selectFields === '*' || selectFields.split(',').some((f) => f.trim() === 'id');
+	for (const chunkFilters of filterChunks) {
+		if (totalYielded >= maxRows) break;
 
-		for (const chunkFilters of filterChunks) {
+		if (returnAll) {
+			const useKeyset =
+				!preferOffset &&
+				(selectFields === '*' || selectFields.split(',').some((f) => f.trim() === 'id'));
+
 			let hasMore = true;
 
-			if (hasIdColumn) {
-				// Keyset pagination
+			if (useKeyset) {
 				let lastId: number | string | null = null;
 
 				while (hasMore) {
 					let query = buildSelectQuery(supabase, table, selectFields, chunkFilters, []);
-					if (lastId !== null) {
-						query = query.gt('id', lastId);
-					}
-					query = query.order('id', { ascending: true }).limit(batchSize);
+					if (lastId !== null) query = query.gt('id', lastId);
+					query = query.order('id', { ascending: true }).limit(BATCH_SIZE);
 
 					const { data, error } = await query;
 					if (error) throw new Error(formatSupabaseError(error));
 
 					if (Array.isArray(data) && data.length > 0) {
-						for (const row of data) allRows.push(row);
+						yield data;
+						totalYielded += data.length;
 						lastId = data[data.length - 1].id;
-						hasMore = data.length === batchSize;
+						hasMore = data.length === BATCH_SIZE;
 					} else {
 						hasMore = false;
 					}
 				}
 			} else {
-				// OFFSET pagination fallback
+				// OFFSET pagination — preserves DB sort order
 				let offset = 0;
 
 				while (hasMore) {
-					const query = buildSelectQuery(supabase, table, selectFields, chunkFilters, sort);
-					const { data, error } = await query.range(offset, offset + batchSize - 1);
+					const query = buildSelectQuery(
+						supabase, table, selectFields, chunkFilters, sort,
+					);
+					const { data, error } = await query.range(offset, offset + BATCH_SIZE - 1);
 					if (error) throw new Error(formatSupabaseError(error));
 
 					if (Array.isArray(data) && data.length > 0) {
-						for (const row of data) allRows.push(row);
-						hasMore = data.length === batchSize;
+						yield data;
+						totalYielded += data.length;
+						hasMore = data.length === BATCH_SIZE;
 					} else {
 						hasMore = false;
 					}
-					offset += batchSize;
+					offset += BATCH_SIZE;
 				}
 			}
-		}
+		} else {
+			// Limited fetch — single request per filter-chunk
+			const remaining = maxRows - totalYielded;
+			if (remaining <= 0) break;
 
-		// Re-apply user sort when keyset pagination overrode it
-		if (hasIdColumn && sort.length > 0) {
-			allRows.sort((a, b) => {
-				for (const s of sort) {
-					const aVal = (a[s.column] ?? null) as any;
-					const bVal = (b[s.column] ?? null) as any;
-					if (aVal === bVal) continue;
-					if (aVal === null) return 1;
-					if (bVal === null) return -1;
-					if (aVal < bVal) return s.ascending ? -1 : 1;
-					if (aVal > bVal) return s.ascending ? 1 : -1;
-				}
-				return 0;
-			});
-		}
-	} else {
-		// Limited fetch
-		for (const chunkFilters of filterChunks) {
 			const query = buildSelectQuery(supabase, table, selectFields, chunkFilters, sort);
-			const { data, error } = await query.limit(limit);
+			const { data, error } = await query.limit(remaining);
 			if (error) throw new Error(formatSupabaseError(error));
-			if (Array.isArray(data)) {
-				for (const row of data) allRows.push(row);
-			}
-		}
 
-		// Trim to limit when multiple chunks exceeded it
-		if (allRows.length > limit) {
-			allRows.length = limit;
+			if (Array.isArray(data) && data.length > 0) {
+				yield data;
+				totalYielded += data.length;
+			}
 		}
 	}
-
-	return allRows;
 }
 
 // ── Node definition ────────────────────────────────────────────────────
@@ -446,7 +449,10 @@ export class SupabaseCsvExport implements INodeType {
 				name: 'enableTransform',
 				type: 'boolean',
 				default: false,
-				description: 'Whether to apply a JavaScript transform before generating the CSV',
+				description:
+					'Whether to apply a JavaScript transform before generating the CSV. ' +
+					'The transform runs per batch (~1000 rows) so it stays memory-efficient ' +
+					'even for very large exports. Use .filter() and .map() to shape your data.',
 			},
 			{
 				displayName: 'Transform Parameters',
@@ -666,6 +672,16 @@ export class SupabaseCsvExport implements INodeType {
 		const limit = returnAll ? 0 : (this.getNodeParameter('limit', 0, 100) as number);
 		const filters = parseFilters(this, 0);
 		const sort = this.getNodeParameter('sort.sortField', 0, []) as IRowSort[];
+		const enableTransform = this.getNodeParameter('enableTransform', 0, false) as boolean;
+		const idColumn = this.getNodeParameter('idColumn', 0, 'id') as string;
+
+		const csvOpts = this.getNodeParameter('csvOptions', 0, {}) as Record<string, unknown>;
+		const csvOptions: CsvOptions = {
+			delimiter: (csvOpts.delimiter as string) || ',',
+			quoteChar: (csvOpts.quoteChar as string) || '"',
+			includeHeaders: csvOpts.includeHeaders !== false,
+			fileName: (csvOpts.fileName as string) || 'export.csv',
+		};
 
 		// Build select string with joins
 		const joins = this.getNodeParameter('joins.join', 0, []) as Array<{
@@ -681,100 +697,132 @@ export class SupabaseCsvExport implements INodeType {
 			selectWithJoins += `,${hint}(${cols})`;
 		}
 
-		// ── 2. Fetch data ──────────────────────────────────────────
-		let rows: Record<string, unknown>[];
+		const { delimiter, quoteChar } = csvOptions;
+
+		// ── Shared state ───────────────────────────────────────────
+		const csvChunks: Buffer[] = [];
+		const ids: unknown[] = [];
+		let rowCount = 0;
+		let headers: string[] | null = null;
+
 		try {
-			rows = await fetchAllRows(
-				supabase,
-				table,
-				selectWithJoins,
-				filters,
-				sort,
-				credentials.host,
-				returnAll,
-				limit,
-			);
+			// ════════════════════════════════════════════════════════════
+			//  STREAMING — fetch, transform, and write CSV per batch.
+			//  At most ~1000 rows are in memory at any time.
+			// ════════════════════════════════════════════════════════════
+
+			// Build the transform function once (if enabled)
+			type TransformFn = (rows: Record<string, unknown>[], params: Record<string, unknown>) => Record<string, unknown>[];
+			let transformFn: TransformFn | null = null;
+			let params: Record<string, unknown> = {};
+
+			if (enableTransform) {
+				const paramEntries = this.getNodeParameter(
+					'transformParams.param', 0, [],
+				) as Array<{ name: string; value: unknown }>;
+				for (const entry of paramEntries) {
+					if (entry.name) params[entry.name] = entry.value;
+				}
+
+				const code = this.getNodeParameter('transformCode', 0, 'return rows;') as string;
+				try {
+					// eslint-disable-next-line @typescript-eslint/no-implied-eval
+					transformFn = new Function('rows', 'params', code) as TransformFn;
+				} catch (error) {
+					const msg = error instanceof Error ? error.message : 'Unknown error';
+					throw new NodeOperationError(this.getNode(), `Transform code syntax error: ${msg}`);
+				}
+			}
+
+			// When the user has a sort order, prefer OFFSET pagination
+			// so the DB preserves ordering across batches.
+			const preferOffset = sort.length > 0;
+
+			for await (const batch of fetchBatches(
+				supabase, table, selectWithJoins, filters, sort,
+				credentials.host, returnAll, limit,
+				preferOffset,
+			)) {
+				// Apply per-batch transform
+				let rows = batch;
+				if (transformFn) {
+					try {
+						const result = transformFn(batch, params);
+						if (!Array.isArray(result)) {
+							throw new Error('Transform code must return an array. Got: ' + typeof result);
+						}
+						rows = result;
+					} catch (error) {
+						if (error instanceof NodeOperationError) throw error;
+						const msg = error instanceof Error ? error.message : 'Unknown error';
+						throw new NodeOperationError(this.getNode(), `Transform code error: ${msg}`);
+					}
+				}
+
+				if (rows.length === 0) continue;
+
+				// Discover headers from first non-empty batch
+				if (headers === null) {
+					headers = discoverHeaders(rows);
+
+					if (csvOptions.includeHeaders) {
+						const headerLine = headers
+							.map((h) => escapeCsvField(h, delimiter, quoteChar))
+							.join(delimiter);
+						csvChunks.push(Buffer.from(headerLine + '\n', 'utf-8'));
+					}
+				}
+
+				// Extract IDs
+				for (const row of rows) {
+					if (row[idColumn] != null) ids.push(row[idColumn]);
+				}
+
+				// Append CSV lines
+				const buf = batchToCsvBuffer(rows, headers, delimiter, quoteChar);
+				csvChunks.push(buf);
+				csvChunks.push(Buffer.from('\n', 'utf-8'));
+
+				rowCount += rows.length;
+			}
+
+			// Trim trailing newline
+			if (csvChunks.length > 0) {
+				const last = csvChunks[csvChunks.length - 1]!;
+				if (last.length === 1 && last[0] === 0x0a) {
+					csvChunks.pop();
+				}
+			}
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : 'Unknown error';
-			throw new NodeOperationError(this.getNode(), `Failed to fetch data: ${msg}`);
+			if (error instanceof NodeOperationError) throw error;
+			throw new NodeOperationError(this.getNode(), `Export failed: ${msg}`);
 		}
 
-		// ── 3. Transform ───────────────────────────────────────────
-		const enableTransform = this.getNodeParameter('enableTransform', 0, false) as boolean;
+		// ── Assemble final CSV buffer ──────────────────────────────
+		const csvBuffer = Buffer.concat(csvChunks);
 
-		if (enableTransform) {
-			// Build params object from the Transform Parameters collection
-			const paramEntries = this.getNodeParameter(
-				'transformParams.param',
-				0,
-				[],
-			) as Array<{ name: string; value: unknown }>;
-			const params: Record<string, unknown> = {};
-			for (const entry of paramEntries) {
-				if (entry.name) {
-					params[entry.name] = entry.value;
-				}
-			}
+		// Release chunk references
+		csvChunks.length = 0;
 
-			const code = this.getNodeParameter('transformCode', 0, 'return rows;') as string;
-			try {
-				const transformFn = new Function('rows', 'params', code);
-				const result = transformFn(rows, params);
-				if (!Array.isArray(result)) {
-					throw new Error(
-						'Transform code must return an array. Got: ' + typeof result,
-					);
-				}
-				rows = result;
-			} catch (error) {
-				const msg = error instanceof Error ? error.message : 'Unknown error';
-				throw new NodeOperationError(
-					this.getNode(),
-					`Transform code error: ${msg}`,
-				);
-			}
-		}
-
-		// ── 4. Extract IDs ─────────────────────────────────────────
-		const idColumn = this.getNodeParameter('idColumn', 0, 'id') as string;
-		const ids: unknown[] = [];
-		for (const row of rows) {
-			if (row[idColumn] !== undefined && row[idColumn] !== null) {
-				ids.push(row[idColumn]);
-			}
-		}
-
-		// ── 5. Generate CSV ────────────────────────────────────────
-		const csvOpts = this.getNodeParameter('csvOptions', 0, {}) as Record<string, unknown>;
-		const csvOptions: CsvOptions = {
-			delimiter: (csvOpts.delimiter as string) || ',',
-			quoteChar: (csvOpts.quoteChar as string) || '"',
-			includeHeaders: csvOpts.includeHeaders !== false,
-			fileName: (csvOpts.fileName as string) || 'export.csv',
-		};
-
-		const csvContent = generateCsv(rows, csvOptions);
-		const csvBuffer = Buffer.from(csvContent, 'utf-8');
-
-		// ── 6. Return binary CSV + JSON metadata ───────────────────
 		const binaryData = await this.helpers.prepareBinaryData(
 			csvBuffer,
 			csvOptions.fileName,
 			'text/csv',
 		);
 
-		const returnItem: INodeExecutionData = {
-			json: {
-				table,
-				rowCount: rows.length,
-				ids,
-				fileName: csvOptions.fileName,
+		return [[
+			{
+				json: {
+					table,
+					rowCount,
+					ids,
+					fileName: csvOptions.fileName,
+				},
+				binary: {
+					data: binaryData,
+				},
 			},
-			binary: {
-				data: binaryData,
-			},
-		};
-
-		return [[returnItem]];
+		]];
 	}
 }
