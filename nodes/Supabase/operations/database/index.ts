@@ -75,6 +75,58 @@ export async function executeDatabaseOperation(
 	return returnData;
 }
 
+/** Maximum rows per bulk API call to limit lock duration and payload size. */
+const BULK_BATCH_SIZE = 500;
+
+/** Maximum retry attempts for transient failures (lock timeout, rate limit, etc.) */
+const MAX_RETRIES = 3;
+
+/** Base delay in ms for exponential backoff between retries. */
+const RETRY_BASE_DELAY_MS = 1000;
+
+/**
+ * Returns true if the error message looks like a transient / retryable failure.
+ */
+function isRetryableError(msg: string): boolean {
+	const lower = msg.toLowerCase();
+	return (
+		lower.includes('lock timeout') ||
+		lower.includes('canceling statement due to lock') ||
+		lower.includes('deadlock') ||
+		lower.includes('too many connections') ||
+		lower.includes('rate limit') ||
+		lower.includes('could not serialize access') ||
+		lower.includes('connection terminated') ||
+		lower.includes('connection reset') ||
+		lower.includes('econnreset') ||
+		lower.includes('timeout')
+	);
+}
+
+/**
+ * Execute an async operation with exponential-backoff retry for transient errors.
+ */
+async function withRetry<T>(fn: () => Promise<T>, label: string): Promise<T> {
+	let lastError: Error | undefined;
+	for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+		try {
+			return await fn();
+		} catch (err: any) {
+			const msg = err?.message ?? String(err);
+			if (attempt < MAX_RETRIES && isRetryableError(msg)) {
+				const delay = RETRY_BASE_DELAY_MS * Math.pow(2, attempt);
+				console.log(`[Supabase ${label}] transient error (attempt ${attempt + 1}/${MAX_RETRIES + 1}), retrying in ${delay}ms: ${msg}`);
+				await new Promise((r) => setTimeout(r, delay));
+				lastError = err instanceof Error ? err : new Error(msg);
+			} else {
+				throw err;
+			}
+		}
+	}
+	// Should be unreachable, but just in case:
+	throw lastError!;
+}
+
 /**
  * Collect row data from all input items
  */
@@ -172,7 +224,7 @@ export async function executeBulkDatabaseOperation(
 }
 
 /**
- * Handle bulk CREATE — single .insert() call for all items
+ * Handle bulk CREATE — batched .insert() calls with retry
  */
 async function handleBulkCreate(
 	this: IExecuteFunctions,
@@ -183,22 +235,32 @@ async function handleBulkCreate(
 	validateTableName(table);
 
 	const rows = collectRowData(this, itemCount);
+	const returnData: INodeExecutionData[] = [];
 
-	const { data, error } = await supabase
-		.from(table)
-		.insert(rows)
-		.select();
+	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
+		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
 
-	if (error) throw new Error(formatSupabaseError(error));
+		const data = await withRetry(async () => {
+			const { data, error } = await supabase
+				.from(table)
+				.insert(batch)
+				.select();
+			if (error) throw new Error(formatSupabaseError(error));
+			return data;
+		}, `CREATE ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`);
 
-	if (Array.isArray(data)) {
-		return data.map((row) => ({ json: row }));
+		if (Array.isArray(data)) {
+			for (const row of data) returnData.push({ json: row });
+		}
 	}
-	return [{ json: { data, operation: 'create', table } }];
+
+	return returnData.length > 0
+		? returnData
+		: [{ json: { data: [], operation: 'create', table } }];
 }
 
 /**
- * Handle bulk UPSERT — single .upsert() call for all items
+ * Handle bulk UPSERT — batched .upsert() calls with retry
  */
 async function handleBulkUpsert(
 	this: IExecuteFunctions,
@@ -214,21 +276,32 @@ async function handleBulkUpsert(
 	const options: any = {};
 	if (onConflict) options.onConflict = onConflict;
 
-	const { data, error } = await supabase
-		.from(table)
-		.upsert(rows, options)
-		.select();
+	const returnData: INodeExecutionData[] = [];
 
-	if (error) throw new Error(formatSupabaseError(error));
+	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
+		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
 
-	if (Array.isArray(data)) {
-		return data.map((row) => ({ json: row }));
+		const data = await withRetry(async () => {
+			const { data, error } = await supabase
+				.from(table)
+				.upsert(batch, options)
+				.select();
+			if (error) throw new Error(formatSupabaseError(error));
+			return data;
+		}, `UPSERT ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`);
+
+		if (Array.isArray(data)) {
+			for (const row of data) returnData.push({ json: row });
+		}
 	}
-	return [{ json: { data, operation: 'upsert', table } }];
+
+	return returnData.length > 0
+		? returnData
+		: [{ json: { data: [], operation: 'upsert', table } }];
 }
 
 /**
- * Handle bulk UPDATE — uses .upsert() with onConflict match column
+ * Handle bulk UPDATE — batched .upsert() calls with onConflict match column and retry
  * Each item must include the match column value in its data.
  */
 async function handleBulkUpdate(
@@ -254,17 +327,28 @@ async function handleBulkUpdate(
 		}
 	}
 
-	const { data, error } = await supabase
-		.from(table)
-		.upsert(rows, { onConflict: matchColumn })
-		.select();
+	const returnData: INodeExecutionData[] = [];
 
-	if (error) throw new Error(formatSupabaseError(error));
+	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
+		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
 
-	if (Array.isArray(data)) {
-		return data.map((row) => ({ json: row }));
+		const data = await withRetry(async () => {
+			const { data, error } = await supabase
+				.from(table)
+				.upsert(batch, { onConflict: matchColumn })
+				.select();
+			if (error) throw new Error(formatSupabaseError(error));
+			return data;
+		}, `UPDATE ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`);
+
+		if (Array.isArray(data)) {
+			for (const row of data) returnData.push({ json: row });
+		}
 	}
-	return [{ json: { data, operation: 'update', table } }];
+
+	return returnData.length > 0
+		? returnData
+		: [{ json: { data: [], operation: 'update', table } }];
 }
 
 /**
