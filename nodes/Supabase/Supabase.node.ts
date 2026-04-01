@@ -146,6 +146,12 @@ export class Supabase implements INodeType {
 						description: 'Return existing row matching criteria, or create it if not found',
 						action: 'Find or create row',
 					},
+					{
+						name: 'Update by Query',
+						value: 'updateByQuery',
+						description: 'Update all rows matching filter conditions (e.g. update where id IN list)',
+						action: 'Update rows by query',
+					},
 				],
 				default: 'read',
 			},
@@ -259,7 +265,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert', 'updateByQuery'],
 					},
 				},
 			},
@@ -278,7 +284,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate', 'updateByQuery'],
 					},
 				},
 			},
@@ -296,7 +302,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'update', 'upsert'],
+						operation: ['create', 'update', 'upsert', 'updateByQuery'],
 						uiMode: ['simple'],
 					},
 				},
@@ -337,7 +343,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'update', 'upsert'],
+						operation: ['create', 'update', 'upsert', 'updateByQuery'],
 						uiMode: ['advanced'],
 					},
 				},
@@ -479,7 +485,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read', 'delete'],
+						operation: ['read', 'delete', 'updateByQuery'],
 						uiMode: ['simple'],
 					},
 				},
@@ -541,7 +547,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read', 'delete'],
+						operation: ['read', 'delete', 'updateByQuery'],
 						uiMode: ['advanced'],
 					},
 				},

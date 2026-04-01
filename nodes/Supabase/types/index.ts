@@ -103,7 +103,8 @@ export type DatabaseOperation =
 	| 'createIndex'
 	| 'dropIndex'
 	| 'customQuery'
-	| 'findOrCreate';
+	| 'findOrCreate'
+	| 'updateByQuery';
 
 export type StorageOperation =
 	| 'uploadFile'

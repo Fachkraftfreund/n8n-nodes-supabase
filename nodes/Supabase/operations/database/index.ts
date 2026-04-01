@@ -65,6 +65,9 @@ export async function executeDatabaseOperation(
 			case 'findOrCreate':
 				returnData.push(...await handleFindOrCreate.call(this, supabase, itemIndex));
 				break;
+			case 'updateByQuery':
+				returnData.push(...await handleUpdateByQuery.call(this, supabase, itemIndex, hostUrl));
+				break;
 			default:
 				throw new Error(`Unknown database operation: ${operation}`);
 		}
@@ -954,4 +957,87 @@ async function handleFindOrCreate(
 	if (insertError) throw new Error(formatSupabaseError(insertError));
 
 	return [{ json: { ...created, _found: false, _created: true } }];
+}
+
+/**
+ * Handle UPDATE BY QUERY operation — update all rows matching filter conditions.
+ * Uses Supabase .update() with filters (e.g. WHERE id IN (...)).
+ * Supports URL chunking for large IN filter values.
+ */
+async function handleUpdateByQuery(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemIndex: number,
+	hostUrl: string,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', itemIndex) as string;
+	validateTableName(table);
+
+	// Collect the values to set
+	const uiMode = this.getNodeParameter('uiMode', itemIndex, 'simple') as string;
+	let updateData: IDataObject;
+
+	if (uiMode === 'advanced') {
+		const jsonData = this.getNodeParameter('jsonData', itemIndex, '{}') as string;
+		try {
+			updateData = JSON.parse(jsonData);
+		} catch {
+			throw new Error('Invalid JSON data for update values');
+		}
+	} else {
+		const columns = this.getNodeParameter('columns.column', itemIndex, []) as Array<{
+			name: string;
+			value: any;
+		}>;
+		updateData = {};
+		for (const column of columns) {
+			if (column.name && column.value !== undefined) {
+				updateData[column.name] = column.value;
+			}
+		}
+	}
+
+	if (Object.keys(updateData).length === 0) {
+		throw new Error('At least one column value is required for update');
+	}
+
+	sanitizeRow(updateData);
+
+	// Get filters
+	const filters = getFilters(this, itemIndex);
+	if (filters.length === 0) {
+		throw new Error('At least one filter is required for Update by Query to prevent accidental full-table updates');
+	}
+
+	// Chunk large IN filters to stay within URL length limits
+	const overhead = estimateUrlOverhead(hostUrl, table, undefined, filters);
+	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
+	const filterChunks = expandChunkedFilters(filters, maxInChars);
+
+	const returnData: INodeExecutionData[] = [];
+
+	for (const chunkFilters of filterChunks) {
+		const data = await withRetry(async () => {
+			let query = supabase.from(table).update(updateData);
+
+			for (const filter of chunkFilters) {
+				const operator = convertFilterOperator(filter.operator);
+				query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
+			}
+
+			const { data, error } = await query.select();
+			if (error) throw new Error(formatSupabaseError(error));
+			return data;
+		}, `UPDATE_BY_QUERY ${table}`);
+
+		if (Array.isArray(data)) {
+			for (const row of data) returnData.push({ json: row });
+		}
+	}
+
+	if (returnData.length === 0) {
+		return [{ json: { data: [], count: 0, operation: 'updateByQuery', table, message: 'No rows matched the filter conditions' } }];
+	}
+
+	return returnData;
 }
