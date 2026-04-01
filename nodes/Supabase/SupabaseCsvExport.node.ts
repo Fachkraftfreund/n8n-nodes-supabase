@@ -8,6 +8,10 @@ import {
 	NodeOperationError,
 } from 'n8n-workflow';
 import { SupabaseClient } from '@supabase/supabase-js';
+import { createWriteStream, createReadStream, unlinkSync, WriteStream } from 'fs';
+import { tmpdir } from 'os';
+import { join } from 'path';
+import { randomBytes } from 'crypto';
 
 import { createSupabaseClient, validateCredentials } from './utils/supabaseClient';
 import {
@@ -62,16 +66,15 @@ function discoverHeaders(rows: Record<string, unknown>[]): string[] {
 }
 
 /**
- * Convert a batch of rows to a single UTF-8 Buffer of CSV lines.
- * Does NOT include a trailing newline after the last line — the caller
- * controls newline placement between chunks.
+ * Convert a batch of rows to CSV lines (string).
+ * Includes a trailing newline so batches can be concatenated.
  */
-function batchToCsvBuffer(
+function batchToCsvLines(
 	rows: Record<string, unknown>[],
 	headers: string[],
 	delimiter: string,
 	quoteChar: string,
-): Buffer {
+): string {
 	const lines = new Array<string>(rows.length);
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i]!;
@@ -79,7 +82,23 @@ function batchToCsvBuffer(
 			.map((h) => escapeCsvField(row[h], delimiter, quoteChar))
 			.join(delimiter);
 	}
-	return Buffer.from(lines.join('\n'), 'utf-8');
+	return lines.join('\n') + '\n';
+}
+
+/**
+ * Write to a stream with backpressure handling.
+ * Waits for `drain` if the internal buffer is full.
+ */
+function streamWrite(stream: WriteStream, data: string): Promise<void> {
+	return new Promise((resolve, reject) => {
+		const ok = stream.write(data, 'utf-8');
+		if (ok) {
+			resolve();
+		} else {
+			stream.once('drain', resolve);
+			stream.once('error', reject);
+		}
+	});
 }
 
 // ── Query helpers ──────────────────────────────────────────────────────
@@ -714,18 +733,21 @@ export class SupabaseCsvExport implements INodeType {
 
 		const { delimiter, quoteChar } = csvOptions;
 
-		// ── Shared state ───────────────────────────────────────────
-		const csvChunks: Buffer[] = [];
+		// ── Stream CSV to a temp file ──────────────────────────────
+		//
+		// Writing to disk keeps memory flat regardless of row count.
+		// Only ~1000 rows (one batch) are in memory at any time.
+		// At the end we pass a ReadStream to prepareBinaryData so
+		// n8n stores the file without loading it all into memory.
+
+		const tmpPath = join(tmpdir(), `n8n-csv-${randomBytes(8).toString('hex')}.csv`);
+		const fileStream = createWriteStream(tmpPath, { encoding: 'utf-8' });
+
 		const ids: unknown[] = [];
 		let rowCount = 0;
 		let headers: string[] | null = null;
 
 		try {
-			// ════════════════════════════════════════════════════════════
-			//  STREAMING — fetch, transform, and write CSV per batch.
-			//  At most ~1000 rows are in memory at any time.
-			// ════════════════════════════════════════════════════════════
-
 			// Build the transform function once (if enabled)
 			type TransformFn = (rows: Record<string, unknown>[], params: Record<string, unknown>) => Record<string, unknown>[];
 			let transformFn: TransformFn | null = null;
@@ -778,8 +800,8 @@ export class SupabaseCsvExport implements INodeType {
 					if (csvOptions.includeHeaders) {
 						const headerLine = headers
 							.map((h) => escapeCsvField(h, delimiter, quoteChar))
-							.join(delimiter);
-						csvChunks.push(Buffer.from(headerLine + '\n', 'utf-8'));
+							.join(delimiter) + '\n';
+						await streamWrite(fileStream, headerLine);
 					}
 				}
 
@@ -788,51 +810,51 @@ export class SupabaseCsvExport implements INodeType {
 					if (row[idColumn] != null) ids.push(row[idColumn]);
 				}
 
-				// Append CSV lines
-				const buf = batchToCsvBuffer(rows, headers, delimiter, quoteChar);
-				csvChunks.push(buf);
-				csvChunks.push(Buffer.from('\n', 'utf-8'));
+				// Write CSV lines to temp file
+				await streamWrite(fileStream, batchToCsvLines(rows, headers, delimiter, quoteChar));
 
 				rowCount += rows.length;
 			}
 
-			// Trim trailing newline
-			if (csvChunks.length > 0) {
-				const last = csvChunks[csvChunks.length - 1]!;
-				if (last.length === 1 && last[0] === 0x0a) {
-					csvChunks.pop();
-				}
-			}
+			// Close the write stream
+			await new Promise<void>((resolve, reject) => {
+				fileStream.end(() => resolve());
+				fileStream.on('error', reject);
+			});
+
+			console.log(`[Supabase CSV] wrote ${rowCount} rows to temp file, passing to n8n binary storage`);
+
+			// Stream the temp file into n8n's binary data storage —
+			// prepareBinaryData accepts a Readable, so the full CSV
+			// is never loaded into Node.js memory.
+			const readStream = createReadStream(tmpPath);
+			const binaryData = await this.helpers.prepareBinaryData(
+				readStream,
+				csvOptions.fileName,
+				'text/csv',
+			);
+
+			return [[
+				{
+					json: {
+						table,
+						rowCount,
+						ids,
+						fileName: csvOptions.fileName,
+					},
+					binary: {
+						data: binaryData,
+					},
+				},
+			]];
 		} catch (error) {
 			const msg = error instanceof Error ? error.message : 'Unknown error';
 			if (error instanceof NodeOperationError) throw error;
 			throw new NodeOperationError(this.getNode(), `Export failed: ${msg}`);
+		} finally {
+			// Clean up temp file — stream may or may not be open
+			try { fileStream.destroy(); } catch { /* ignore */ }
+			try { unlinkSync(tmpPath); } catch { /* ignore if already gone */ }
 		}
-
-		// ── Assemble final CSV buffer ──────────────────────────────
-		const csvBuffer = Buffer.concat(csvChunks);
-
-		// Release chunk references
-		csvChunks.length = 0;
-
-		const binaryData = await this.helpers.prepareBinaryData(
-			csvBuffer,
-			csvOptions.fileName,
-			'text/csv',
-		);
-
-		return [[
-			{
-				json: {
-					table,
-					rowCount,
-					ids,
-					fileName: csvOptions.fileName,
-				},
-				binary: {
-					data: binaryData,
-				},
-			},
-		]];
 	}
 }
