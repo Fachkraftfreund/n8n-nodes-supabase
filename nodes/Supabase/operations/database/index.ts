@@ -100,7 +100,14 @@ function deduplicateByConflictKeys(rows: IDataObject[], conflictColumns: string)
 	const seen = new Map<string, number>();
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i]!;
-		const compositeKey = keys.map((k) => String(row[k] ?? '')).join('\0');
+		// Build composite key using the conflict column values.
+		// Normalize: trim whitespace, lowercase, and collapse types so that
+		// values which Postgres would treat as identical are matched here too.
+		const compositeKey = keys.map((k) => {
+			const val = row[k];
+			if (val === null || val === undefined) return '';
+			return String(val).trim().toLowerCase();
+		}).join('\0');
 		seen.set(compositeKey, i);
 	}
 	return Array.from(seen.values()).sort((a, b) => a - b).map((i) => rows[i]!);
@@ -295,7 +302,6 @@ async function handleBulkUpsert(
 	validateTableName(table);
 
 	let rows = collectRowData(this, itemCount);
-	console.log(`[Supabase UPSERT ${table}] rows=${rows.length}, onConflict="${onConflict}", deduplicate=${deduplicate}`);
 
 	const options: any = {};
 	if (onConflict) options.onConflict = onConflict;
@@ -308,10 +314,9 @@ async function handleBulkUpsert(
 	}
 
 	const returnData: INodeExecutionData[] = [];
-	const duplicateError = 'cannot affect row a second time';
 
 	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
-		let batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
+		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
 		const batchLabel = `UPSERT ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`;
 
 		const data = await withRetry(async () => {
@@ -319,19 +324,7 @@ async function handleBulkUpsert(
 				.from(table)
 				.upsert(batch, options)
 				.select();
-			if (error) {
-				const msg = formatSupabaseError(error);
-				// Catch duplicate-row error and retry with deduplication as fallback
-				if (msg.toLowerCase().includes(duplicateError) && onConflict) {
-					const before = batch.length;
-					batch = deduplicateByConflictKeys(batch, onConflict);
-					console.log(`[Supabase ${batchLabel}] duplicate-row error caught, dedup fallback: ${before} → ${batch.length} rows`);
-					const retry = await supabase.from(table).upsert(batch, options).select();
-					if (retry.error) throw new Error(formatSupabaseError(retry.error));
-					return retry.data;
-				}
-				throw new Error(msg);
-			}
+			if (error) throw new Error(formatSupabaseError(error));
 			return data;
 		}, batchLabel);
 
@@ -364,7 +357,6 @@ async function handleBulkUpdate(
 
 	const deduplicate = this.getNodeParameter('deduplicateByConflict', 0, false) as boolean;
 	let rows = collectRowData(this, itemCount);
-	console.log(`[Supabase UPDATE ${table}] rows=${rows.length}, matchColumn="${matchColumn}", deduplicate=${deduplicate}`);
 
 	// Validate every row includes the match column
 	for (let i = 0; i < rows.length; i++) {
@@ -381,10 +373,9 @@ async function handleBulkUpdate(
 	}
 
 	const returnData: INodeExecutionData[] = [];
-	const duplicateError = 'cannot affect row a second time';
 
 	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
-		let batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
+		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
 		const batchLabel = `UPDATE ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`;
 
 		const data = await withRetry(async () => {
@@ -392,18 +383,7 @@ async function handleBulkUpdate(
 				.from(table)
 				.upsert(batch, { onConflict: matchColumn })
 				.select();
-			if (error) {
-				const msg = formatSupabaseError(error);
-				if (msg.toLowerCase().includes(duplicateError)) {
-					const before = batch.length;
-					batch = deduplicateByConflictKeys(batch, matchColumn);
-					console.log(`[Supabase ${batchLabel}] duplicate-row error caught, dedup fallback: ${before} → ${batch.length} rows`);
-					const retry = await supabase.from(table).upsert(batch, { onConflict: matchColumn }).select();
-					if (retry.error) throw new Error(formatSupabaseError(retry.error));
-					return retry.data;
-				}
-				throw new Error(msg);
-			}
+			if (error) throw new Error(formatSupabaseError(error));
 			return data;
 		}, batchLabel);
 
