@@ -365,6 +365,21 @@ export class Supabase implements INodeType {
 				},
 			},
 
+			// Deduplicate by Conflict Keys
+			{
+				displayName: 'Remove Duplicate Rows',
+				name: 'deduplicateByConflict',
+				type: 'boolean',
+				default: false,
+				description: 'When enabled, removes duplicate rows by the conflict/match column(s) before sending to Supabase. Keeps the last occurrence. Prevents the "ON CONFLICT DO UPDATE command cannot affect row a second time" error.',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['upsert', 'update'],
+					},
+				},
+			},
+
 			// Match Column for Update (identifies which row to update)
 			{
 				displayName: 'Match Column',

@@ -293,15 +293,18 @@ async function handleBulkUpsert(
 	const onConflict = this.getNodeParameter('onConflict', 0, '') as string;
 	validateTableName(table);
 
+	const deduplicate = this.getNodeParameter('deduplicateByConflict', 0, false) as boolean;
 	let rows = collectRowData(this, itemCount);
 
 	const options: any = {};
 	if (onConflict) {
 		options.onConflict = onConflict;
-		const before = rows.length;
-		rows = deduplicateByConflictKeys(rows, onConflict);
-		if (rows.length < before) {
-			console.log(`[Supabase UPSERT ${table}] deduplicated input: ${before} → ${rows.length} rows by conflict key "${onConflict}"`);
+		if (deduplicate) {
+			const before = rows.length;
+			rows = deduplicateByConflictKeys(rows, onConflict);
+			if (rows.length < before) {
+				console.log(`[Supabase UPSERT ${table}] deduplicated input: ${before} → ${rows.length} rows by conflict key "${onConflict}"`);
+			}
 		}
 	}
 
@@ -347,6 +350,7 @@ async function handleBulkUpdate(
 		throw new Error('Match Column is required for update operations');
 	}
 
+	const deduplicate = this.getNodeParameter('deduplicateByConflict', 0, false) as boolean;
 	let rows = collectRowData(this, itemCount);
 
 	// Validate every row includes the match column
@@ -357,10 +361,12 @@ async function handleBulkUpdate(
 		}
 	}
 
-	const before = rows.length;
-	rows = deduplicateByConflictKeys(rows, matchColumn);
-	if (rows.length < before) {
-		console.log(`[Supabase UPDATE ${table}] deduplicated input: ${before} → ${rows.length} rows by match column "${matchColumn}"`);
+	if (deduplicate) {
+		const before = rows.length;
+		rows = deduplicateByConflictKeys(rows, matchColumn);
+		if (rows.length < before) {
+			console.log(`[Supabase UPDATE ${table}] deduplicated input: ${before} → ${rows.length} rows by match column "${matchColumn}"`);
+		}
 	}
 
 	const returnData: INodeExecutionData[] = [];
