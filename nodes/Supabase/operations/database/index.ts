@@ -87,6 +87,27 @@ const MAX_RETRIES = 3;
 /** Base delay in ms for exponential backoff between retries. */
 const RETRY_BASE_DELAY_MS = 1000;
 
+const DUPLICATE_ROW_ERROR = 'cannot affect row a second time';
+
+/**
+ * Deduplicate rows by conflict column(s), keeping the last occurrence.
+ * This prevents the Postgres "ON CONFLICT DO UPDATE command cannot affect
+ * row a second time" error that occurs when a single batch contains
+ * multiple rows with the same conflict key values.
+ */
+function deduplicateByConflictKeys(rows: IDataObject[], conflictColumns: string): IDataObject[] {
+	const keys = conflictColumns.split(',').map((k) => k.trim()).filter(Boolean);
+	if (keys.length === 0) return rows;
+
+	const seen = new Map<string, number>();
+	for (let i = 0; i < rows.length; i++) {
+		const row = rows[i]!;
+		const compositeKey = keys.map((k) => String(row[k] ?? '')).join('\0');
+		seen.set(compositeKey, i);
+	}
+	return Array.from(seen.values()).sort((a, b) => a - b).map((i) => rows[i]!);
+}
+
 /**
  * Returns true if the error message looks like a transient / retryable failure.
  */
@@ -282,16 +303,28 @@ async function handleBulkUpsert(
 	const returnData: INodeExecutionData[] = [];
 
 	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
-		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
+		let batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
+		const batchLabel = `UPSERT ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`;
 
 		const data = await withRetry(async () => {
 			const { data, error } = await supabase
 				.from(table)
 				.upsert(batch, options)
 				.select();
-			if (error) throw new Error(formatSupabaseError(error));
+			if (error) {
+				const msg = formatSupabaseError(error);
+				if (msg.toLowerCase().includes(DUPLICATE_ROW_ERROR) && onConflict) {
+					const before = batch.length;
+					batch = deduplicateByConflictKeys(batch, onConflict);
+					console.log(`[Supabase ${batchLabel}] removed ${before - batch.length} duplicate(s) by conflict key "${onConflict}", retrying ${batch.length} rows`);
+					const retry = await supabase.from(table).upsert(batch, options).select();
+					if (retry.error) throw new Error(formatSupabaseError(retry.error));
+					return retry.data;
+				}
+				throw new Error(msg);
+			}
 			return data;
-		}, `UPSERT ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`);
+		}, batchLabel);
 
 		if (Array.isArray(data)) {
 			for (const row of data) returnData.push({ json: row });
@@ -333,16 +366,28 @@ async function handleBulkUpdate(
 	const returnData: INodeExecutionData[] = [];
 
 	for (let offset = 0; offset < rows.length; offset += BULK_BATCH_SIZE) {
-		const batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
+		let batch = rows.slice(offset, offset + BULK_BATCH_SIZE);
+		const batchLabel = `UPDATE ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`;
 
 		const data = await withRetry(async () => {
 			const { data, error } = await supabase
 				.from(table)
 				.upsert(batch, { onConflict: matchColumn })
 				.select();
-			if (error) throw new Error(formatSupabaseError(error));
+			if (error) {
+				const msg = formatSupabaseError(error);
+				if (msg.toLowerCase().includes(DUPLICATE_ROW_ERROR)) {
+					const before = batch.length;
+					batch = deduplicateByConflictKeys(batch, matchColumn);
+					console.log(`[Supabase ${batchLabel}] removed ${before - batch.length} duplicate(s) by match column "${matchColumn}", retrying ${batch.length} rows`);
+					const retry = await supabase.from(table).upsert(batch, { onConflict: matchColumn }).select();
+					if (retry.error) throw new Error(formatSupabaseError(retry.error));
+					return retry.data;
+				}
+				throw new Error(msg);
+			}
 			return data;
-		}, `UPDATE ${table} batch ${Math.floor(offset / BULK_BATCH_SIZE) + 1}`);
+		}, batchLabel);
 
 		if (Array.isArray(data)) {
 			for (const row of data) returnData.push({ json: row });
