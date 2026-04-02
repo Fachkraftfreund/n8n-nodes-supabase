@@ -291,21 +291,19 @@ async function handleBulkUpsert(
 ): Promise<INodeExecutionData[]> {
 	const table = this.getNodeParameter('table', 0) as string;
 	const onConflict = this.getNodeParameter('onConflict', 0, '') as string;
+	const deduplicate = this.getNodeParameter('deduplicateByConflict', 0, false) as boolean;
 	validateTableName(table);
 
-	const deduplicate = this.getNodeParameter('deduplicateByConflict', 0, false) as boolean;
 	let rows = collectRowData(this, itemCount);
 
 	const options: any = {};
-	if (onConflict) {
-		options.onConflict = onConflict;
-		if (deduplicate) {
-			const before = rows.length;
-			rows = deduplicateByConflictKeys(rows, onConflict);
-			if (rows.length < before) {
-				console.log(`[Supabase UPSERT ${table}] deduplicated input: ${before} → ${rows.length} rows by conflict key "${onConflict}"`);
-			}
-		}
+	if (onConflict) options.onConflict = onConflict;
+
+	// Deduplicate rows by conflict key(s) before sending to Supabase
+	if (deduplicate && onConflict) {
+		const before = rows.length;
+		rows = deduplicateByConflictKeys(rows, onConflict);
+		console.log(`[Supabase UPSERT ${table}] dedup by "${onConflict}": ${before} → ${rows.length} rows`);
 	}
 
 	const returnData: INodeExecutionData[] = [];
