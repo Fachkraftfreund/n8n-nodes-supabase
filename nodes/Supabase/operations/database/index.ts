@@ -101,12 +101,16 @@ function deduplicateByConflictKeys(rows: IDataObject[], conflictColumns: string)
 	for (let i = 0; i < rows.length; i++) {
 		const row = rows[i]!;
 		// Build composite key using the conflict column values.
-		// Normalize: trim whitespace, lowercase, and collapse types so that
-		// values which Postgres would treat as identical are matched here too.
+		// Normalize to match how Postgres would compare: numeric strings are
+		// compared as numbers (e.g. "01067" and "1067" both become 1067 in an
+		// integer column), and text is trimmed + lowercased.
 		const compositeKey = keys.map((k) => {
 			const val = row[k];
-			if (val === null || val === undefined) return '';
-			return String(val).trim().toLowerCase();
+			if (val === null || val === undefined) return '\x00null';
+			const str = String(val).trim();
+			const num = Number(str);
+			if (str !== '' && !isNaN(num)) return String(num);
+			return str.toLowerCase();
 		}).join('\0');
 		seen.set(compositeKey, i);
 	}
@@ -310,7 +314,9 @@ async function handleBulkUpsert(
 	if (deduplicate && onConflict) {
 		const before = rows.length;
 		rows = deduplicateByConflictKeys(rows, onConflict);
-		console.log(`[Supabase UPSERT ${table}] dedup by "${onConflict}": ${before} → ${rows.length} rows`);
+		if (rows.length < before) {
+			console.log(`[Supabase UPSERT ${table}] dedup by "${onConflict}": ${before} → ${rows.length} rows`);
+		}
 	}
 
 	const returnData: INodeExecutionData[] = [];
