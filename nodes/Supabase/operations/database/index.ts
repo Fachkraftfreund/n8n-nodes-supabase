@@ -15,6 +15,7 @@ import {
 	expandChunkedFilters,
 	estimateUrlOverhead,
 	computeMaxIdsPerChunk,
+	computeBatchSize,
 	MAX_SAFE_URL_LENGTH,
 	formatSupabaseError,
 } from '../../utils/supabaseClient';
@@ -524,13 +525,13 @@ async function handleRead(
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
 	const maxItems = computeMaxIdsPerChunk(selectWithJoins);
 	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
+	const batchSize = computeBatchSize(selectWithJoins);
 
-	console.log(`[Supabase READ] item=${itemIndex} table=${table} returnAll=${returnAll} chunks=${filterChunks.length} maxItems=${maxItems} maxInChars=${maxInChars}`);
+	console.log(`[Supabase READ] item=${itemIndex} table=${table} returnAll=${returnAll} chunks=${filterChunks.length} maxItems=${maxItems} maxInChars=${maxInChars} batchSize=${batchSize}`);
 
 	const returnData: INodeExecutionData[] = [];
 
 	if (returnAll) {
-		const batchSize = 1000;
 		// Check if select includes 'id' — if so use fast keyset pagination, otherwise OFFSET
 		const selectFields = returnFields && returnFields !== '*' ? returnFields : '*';
 		const hasIdColumn = selectFields === '*' || selectFields.split(',').some(f => f.trim() === 'id');

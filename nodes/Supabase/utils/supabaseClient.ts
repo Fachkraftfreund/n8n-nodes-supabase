@@ -250,6 +250,33 @@ export function computeMaxIdsPerChunk(selectFields?: string): number {
 }
 
 /**
+ * Computes a pagination batch size based on query complexity.
+ *
+ * More embedded resources (JOINs) means each batch is heavier for
+ * PostgREST to resolve.  With many joins a batch of 1000 rows can
+ * easily exceed the 60-second request timeout, so we scale down.
+ *
+ * Formula: 1000 / (1 + joinCount * 0.5)
+ *   0 joins → 1000
+ *   1 join  → 666
+ *   2 joins → 500
+ *   3 joins → 400
+ *   5 joins → 285
+ *   7 joins → 222
+ */
+export function computeBatchSize(selectFields?: string): number {
+	const BASE = 2000;
+
+	if (!selectFields || selectFields === '*') return BASE;
+
+	const joinCount = (selectFields.match(/\(/g) || []).length;
+
+	if (joinCount === 0) return BASE;
+
+	return Math.max(50, Math.floor(BASE / (1 + joinCount * 0.5)));
+}
+
+/**
  * Estimates how many URL characters the non-IN-value parts of a PostgREST
  * query will consume.  The caller subtracts this from MAX_SAFE_URL_LENGTH
  * to obtain the budget available for IN filter values.

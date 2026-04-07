@@ -21,6 +21,7 @@ import {
 	expandChunkedFilters,
 	estimateUrlOverhead,
 	computeMaxIdsPerChunk,
+	computeBatchSize,
 	MAX_SAFE_URL_LENGTH,
 	formatSupabaseError,
 } from './utils/supabaseClient';
@@ -183,7 +184,7 @@ function parseFilters(context: IExecuteFunctions, itemIndex: number): IRowFilter
 
 // ── Batched fetch (async generator) ────────────────────────────────────
 
-const BATCH_SIZE = 1000;
+const DEFAULT_BATCH_SIZE = 1000;
 
 /**
  * Yields rows in batches of ~1000 using keyset pagination (O(1) per batch)
@@ -204,6 +205,7 @@ async function* fetchBatches(
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
 	const maxItems = computeMaxIdsPerChunk(selectFields);
 	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
+	const BATCH_SIZE = computeBatchSize(selectFields);
 
 	const hasIdColumn =
 		selectFields === '*' || selectFields.split(',').some((f) => f.trim() === 'id');
@@ -212,7 +214,7 @@ async function* fetchBatches(
 	const maxRows = returnAll ? Infinity : limit;
 	const startTime = Date.now();
 
-	console.log(`[Supabase CSV] starting export table=${table} returnAll=${returnAll} chunks=${filterChunks.length} keyset=${hasIdColumn}`);
+	console.log(`[Supabase CSV] starting export table=${table} returnAll=${returnAll} chunks=${filterChunks.length} keyset=${hasIdColumn} batchSize=${BATCH_SIZE}`);
 
 	for (let ci = 0; ci < filterChunks.length; ci++) {
 		const chunkFilters = filterChunks[ci]!;
