@@ -633,6 +633,36 @@ export class Supabase implements INodeType {
 								default: 'left',
 								description: 'Left returns all rows even without a match; Inner only returns rows with a match',
 							},
+							{
+								displayName: 'Order By',
+								name: 'orderBy',
+								type: 'string',
+								default: '',
+								placeholder: 'created_at',
+								description: 'Column in the joined table to order by (leave empty for no ordering)',
+							},
+							{
+								displayName: 'Order Ascending',
+								name: 'orderAscending',
+								type: 'boolean',
+								default: false,
+								description: 'Whether to sort in ascending order (default descending, useful for "latest first")',
+								displayOptions: {
+									hide: {
+										orderBy: [''],
+									},
+								},
+							},
+							{
+								displayName: 'Limit',
+								name: 'limit',
+								type: 'number',
+								typeOptions: {
+									minValue: 0,
+								},
+								default: 0,
+								description: 'Max rows to return from the joined table per parent row (0 = no limit). Set to 1 to get only the latest match.',
+							},
 						],
 					},
 				],

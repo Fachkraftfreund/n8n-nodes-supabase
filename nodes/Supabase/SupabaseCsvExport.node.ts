@@ -103,12 +103,22 @@ function streamWrite(stream: WriteStream, data: string): Promise<void> {
 
 // ── Query helpers ──────────────────────────────────────────────────────
 
+interface IJoinConfig {
+	table: string;
+	columns: string;
+	joinType: string;
+	orderBy?: string;
+	orderAscending?: boolean;
+	limit?: number;
+}
+
 function buildSelectQuery(
 	supabase: SupabaseClient,
 	table: string,
 	selectFields: string,
 	filters: IRowFilter[],
 	sort: IRowSort[],
+	joins?: IJoinConfig[],
 ) {
 	let query = supabase.from(table).select(selectFields);
 
@@ -123,6 +133,22 @@ function buildSelectQuery(
 
 	for (const s of sort) {
 		query = query.order(s.column, { ascending: s.ascending });
+	}
+
+	// Apply order/limit on joined (embedded) tables
+	if (joins) {
+		for (const j of joins) {
+			if (!j.table) continue;
+			if (j.orderBy) {
+				query = query.order(j.orderBy, {
+					ascending: j.orderAscending ?? false,
+					referencedTable: j.table,
+				});
+			}
+			if (j.limit && j.limit > 0) {
+				query = query.limit(j.limit, { referencedTable: j.table });
+			}
+		}
 	}
 
 	return query;
@@ -172,6 +198,7 @@ async function* fetchBatches(
 	hostUrl: string,
 	returnAll: boolean,
 	limit: number,
+	joins?: IJoinConfig[],
 ): AsyncGenerator<Record<string, unknown>[]> {
 	const overhead = estimateUrlOverhead(hostUrl, table, selectFields, filters, sort);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
@@ -200,7 +227,7 @@ async function* fetchBatches(
 				let lastId: number | string | null = null;
 
 				while (hasMore) {
-					let query = buildSelectQuery(supabase, table, selectFields, chunkFilters, []);
+					let query = buildSelectQuery(supabase, table, selectFields, chunkFilters, [], joins);
 					if (lastId !== null) query = query.gt('id', lastId);
 					query = query.order('id', { ascending: true }).limit(BATCH_SIZE);
 
@@ -228,7 +255,7 @@ async function* fetchBatches(
 
 				while (hasMore) {
 					const query = buildSelectQuery(
-						supabase, table, selectFields, chunkFilters, sort,
+						supabase, table, selectFields, chunkFilters, sort, joins,
 					);
 					const { data, error } = await query.range(offset, offset + BATCH_SIZE - 1);
 					if (error) throw new Error(formatSupabaseError(error));
@@ -254,7 +281,7 @@ async function* fetchBatches(
 			const remaining = maxRows - totalYielded;
 			if (remaining <= 0) break;
 
-			const query = buildSelectQuery(supabase, table, selectFields, chunkFilters, sort);
+			const query = buildSelectQuery(supabase, table, selectFields, chunkFilters, sort, joins);
 			const { data, error } = await query.limit(remaining);
 			if (error) throw new Error(formatSupabaseError(error));
 
@@ -353,6 +380,36 @@ export class SupabaseCsvExport implements INodeType {
 									{ name: 'Inner Join', value: 'inner' },
 								],
 								default: 'left',
+							},
+							{
+								displayName: 'Order By',
+								name: 'orderBy',
+								type: 'string',
+								default: '',
+								placeholder: 'created_at',
+								description: 'Column in the joined table to order by (leave empty for no ordering)',
+							},
+							{
+								displayName: 'Order Ascending',
+								name: 'orderAscending',
+								type: 'boolean',
+								default: false,
+								description: 'Whether to sort in ascending order (default descending, useful for "latest first")',
+								displayOptions: {
+									hide: {
+										orderBy: [''],
+									},
+								},
+							},
+							{
+								displayName: 'Limit',
+								name: 'limit',
+								type: 'number',
+								typeOptions: {
+									minValue: 0,
+								},
+								default: 0,
+								description: 'Max rows from the joined table per parent row (0 = no limit, 1 = latest only)',
 							},
 						],
 					},
@@ -718,11 +775,7 @@ export class SupabaseCsvExport implements INodeType {
 		};
 
 		// Build select string with joins
-		const joins = this.getNodeParameter('joins.join', 0, []) as Array<{
-			table: string;
-			columns: string;
-			joinType: string;
-		}>;
+		const joins = this.getNodeParameter('joins.join', 0, []) as IJoinConfig[];
 		let selectWithJoins = returnFields;
 		for (const j of joins) {
 			if (!j.table) continue;
@@ -773,7 +826,7 @@ export class SupabaseCsvExport implements INodeType {
 
 			for await (const batch of fetchBatches(
 				supabase, table, selectWithJoins, filters, sort,
-				credentials.host, returnAll, limit,
+				credentials.host, returnAll, limit, joins,
 			)) {
 				// Apply per-batch transform
 				let rows = batch;

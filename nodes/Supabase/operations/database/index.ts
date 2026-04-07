@@ -436,6 +436,15 @@ function getFilters(context: IExecuteFunctions, itemIndex: number): IRowFilter[]
 /**
  * Build a SELECT query with filters and sorting applied.
  */
+interface IJoinConfig {
+	table: string;
+	columns: string;
+	joinType: string;
+	orderBy?: string;
+	orderAscending?: boolean;
+	limit?: number;
+}
+
 function buildReadQuery(
 	supabase: SupabaseClient,
 	table: string,
@@ -443,6 +452,7 @@ function buildReadQuery(
 	filters: IRowFilter[],
 	sort: IRowSort[],
 	options?: { count?: 'exact' },
+	joins?: IJoinConfig[],
 ) {
 	const selectFields = returnFields && returnFields !== '*' ? returnFields : '*';
 	let query = supabase.from(table).select(selectFields, options);
@@ -454,6 +464,22 @@ function buildReadQuery(
 
 	for (const sortField of sort) {
 		query = query.order(sortField.column, { ascending: sortField.ascending });
+	}
+
+	// Apply order/limit on joined (embedded) tables
+	if (joins) {
+		for (const j of joins) {
+			if (!j.table) continue;
+			if (j.orderBy) {
+				query = query.order(j.orderBy, {
+					ascending: j.orderAscending ?? false,
+					referencedTable: j.table,
+				});
+			}
+			if (j.limit && j.limit > 0) {
+				query = query.limit(j.limit, { referencedTable: j.table });
+			}
+		}
 	}
 
 	return query;
@@ -478,9 +504,7 @@ async function handleRead(
 	const sort = this.getNodeParameter('sort.sortField', itemIndex, []) as IRowSort[];
 
 	// Build join fragments from the Joins UI and append to the select string
-	const joins = this.getNodeParameter('joins.join', itemIndex, []) as Array<{
-		table: string; columns: string; joinType: string;
-	}>;
+	const joins = this.getNodeParameter('joins.join', itemIndex, []) as IJoinConfig[];
 	let selectWithJoins = returnFields;
 	for (const j of joins) {
 		if (!j.table) continue;
@@ -525,7 +549,7 @@ async function handleRead(
 				let lastId: number | string | null = null;
 
 				while (hasMore) {
-					let query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, []);
+					let query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, [], undefined, joins);
 					if (lastId !== null) {
 						query = query.gt('id', lastId);
 					}
@@ -554,7 +578,7 @@ async function handleRead(
 				let batchOffset = 0;
 
 				while (hasMore) {
-					const query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, sort);
+					const query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, sort, undefined, joins);
 					const { data, error } = await query.range(batchOffset, batchOffset + batchSize - 1);
 					if (error) {
 						console.log(`[Supabase READ] chunk ${ci + 1} batch ${batchCount + 1} FAILED after ${Date.now() - chunkStart}ms: ${formatSupabaseError(error)}`);
@@ -599,7 +623,7 @@ async function handleRead(
 		const isMultiChunk = filterChunks.length > 1;
 
 		for (const chunkFilters of filterChunks) {
-			let query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, sort);
+			let query = buildReadQuery(supabase, table, selectWithJoins, chunkFilters, sort, undefined, joins);
 
 			if (isMultiChunk) {
 				// Multiple chunks: fetch enough per chunk so we can apply global offset+limit after merging
