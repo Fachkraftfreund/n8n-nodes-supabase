@@ -356,6 +356,8 @@ async function handleBulkUpdate(
 ): Promise<INodeExecutionData[]> {
 	const table = this.getNodeParameter('table', 0) as string;
 	const matchColumn = this.getNodeParameter('matchColumn', 0) as string;
+	const returnFields = this.getNodeParameter('returnFields', 0, '*') as string;
+	const selectFields = returnFields && returnFields !== '*' ? returnFields : '*';
 	validateTableName(table);
 
 	if (!matchColumn) {
@@ -389,7 +391,7 @@ async function handleBulkUpdate(
 			const { data, error } = await supabase
 				.from(table)
 				.upsert(batch, { onConflict: matchColumn })
-				.select();
+				.select(selectFields);
 			if (error) throw new Error(formatSupabaseError(error));
 			return data;
 		}, batchLabel);
@@ -1045,6 +1047,8 @@ async function handleUpdateByQuery(
 	hostUrl: string,
 ): Promise<INodeExecutionData[]> {
 	const table = this.getNodeParameter('table', itemIndex) as string;
+	const returnFields = this.getNodeParameter('returnFields', itemIndex, '*') as string;
+	const selectFields = returnFields && returnFields !== '*' ? returnFields : '*';
 	validateTableName(table);
 
 	// Collect the values to set
@@ -1099,7 +1103,7 @@ async function handleUpdateByQuery(
 				query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
 			}
 
-			const { data, error } = await query.select();
+			const { data, error } = await query.select(selectFields);
 			if (error) throw new Error(formatSupabaseError(error));
 			return data;
 		}, `UPDATE_BY_QUERY ${table}`);
