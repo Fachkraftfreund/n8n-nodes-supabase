@@ -1234,20 +1234,41 @@ async function handleBatchCount(
 		whereClauses.push(`"${groupByColumn}" IN (${escaped})`);
 	}
 
-	// Build join clauses from Joins UI
+	// Build join clauses from Joins UI — discover FK columns from the catalog
 	const joins = this.getNodeParameter('joins.join', 0, []) as IJoinConfig[];
 	const joinClauses: string[] = [];
 	for (const j of joins) {
 		if (!j.table) continue;
 		validateTableName(j.table);
+
+		// Look up the actual FK column from information_schema
+		const fkQuery = `
+			SELECT kcu.column_name AS fk_column, ccu.column_name AS parent_column
+			FROM information_schema.table_constraints tc
+			JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+			JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name AND tc.table_schema = ccu.table_schema
+			WHERE tc.constraint_type = 'FOREIGN KEY'
+			  AND tc.table_name = '${j.table.replace(/'/g, "''")}'
+			  AND ccu.table_name = '${table.replace(/'/g, "''")}'
+			LIMIT 1
+		`;
+		const { data: fkData, error: fkError } = await supabase.rpc('exec_sql_select', { sql: fkQuery });
+		if (fkError) throw new Error(`Failed to discover FK for ${j.table}: ${formatSupabaseError(fkError)}`);
+
+		if (!Array.isArray(fkData) || fkData.length === 0) {
+			throw new Error(`No foreign key found from "${j.table}" to "${table}". Check that a FK relationship exists.`);
+		}
+
+		const fkColumn = fkData[0].fk_column;
+		const parentColumn = fkData[0].parent_column;
 		const joinType = j.joinType === 'inner' ? 'INNER JOIN' : 'LEFT JOIN';
-		joinClauses.push(`${joinType} "${j.table}" ON "${j.table}"."${table.replace(/s$/, '')}_id" = "${table}"."id"`);
+		joinClauses.push(`${joinType} "${j.table}" ON "${j.table}"."${fkColumn}" = "${table}"."${parentColumn}"`);
 	}
 
 	const whereStr = whereClauses.length > 0 ? ` WHERE ${whereClauses.join(' AND ')}` : '';
 	const joinStr = joinClauses.length > 0 ? ` ${joinClauses.join(' ')}` : '';
 
-	const sql = `SELECT "${groupByColumn}", COUNT(*) as count FROM "${table}"${joinStr}${whereStr} GROUP BY "${groupByColumn}" ORDER BY count DESC`;
+	const sql = `SELECT "${groupByColumn}", COUNT(DISTINCT "${table}"."id") as count FROM "${table}"${joinStr}${whereStr} GROUP BY "${groupByColumn}" ORDER BY count DESC`;
 
 	console.log(`[Supabase BATCH COUNT] sql: ${sql}`);
 
