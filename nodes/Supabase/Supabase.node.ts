@@ -773,6 +773,39 @@ export class Supabase implements INodeType {
 				},
 			},
 
+			// Batch Counts
+			{
+				displayName: 'Batch Counts',
+				name: 'batchCounts',
+				type: 'boolean',
+				default: false,
+				description: 'Whether to combine all input items into a single GROUP BY query instead of one count per item. Requires the exec_sql_select RPC function.',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['count'],
+					},
+				},
+			},
+			{
+				displayName: 'Group By Column',
+				name: 'groupByColumn',
+				type: 'options',
+				typeOptions: {
+					loadOptionsMethod: 'getColumns',
+				},
+				required: true,
+				default: '',
+				description: 'Column to group counts by (e.g. sector). Each unique value produces one output item with its count.',
+				displayOptions: {
+					show: {
+						resource: ['database'],
+						operation: ['count'],
+						batchCounts: [true],
+					},
+				},
+			},
+
 			// Storage Bucket Name
 			{
 				displayName: 'Bucket',
@@ -990,7 +1023,25 @@ export class Supabase implements INodeType {
 
 		// Bulk database operations: collect all items, single API call
 		// Skip if input is a single empty item (no data to write)
-		if (resource === 'database' && ['create', 'upsert', 'update'].includes(operation as string)) {
+		if (resource === 'database' && operation === 'count' && this.getNodeParameter('batchCounts', 0, false) as boolean) {
+			// Batch count: single GROUP BY query for all input items
+			try {
+				const results = await executeBulkDatabaseOperation.call(
+					this,
+					supabase,
+					operation as DatabaseOperation,
+					items.length,
+				);
+				for (const r of results) returnData.push(r);
+			} catch (error) {
+				const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+				if (this.continueOnFail()) {
+					returnData.push({ json: { error: errorMessage } });
+				} else {
+					throw new NodeOperationError(this.getNode(), errorMessage);
+				}
+			}
+		} else if (resource === 'database' && ['create', 'upsert', 'update'].includes(operation as string)) {
 			const firstItem = items[0];
 			if (
 				items.length === 1 &&
@@ -1015,7 +1066,7 @@ export class Supabase implements INodeType {
 					throw new NodeOperationError(this.getNode(), errorMessage);
 				}
 			}
-		} else if (resource === 'database' && (operation === 'read' || operation === 'count')) {
+		} else if (resource === 'database' && operation === 'read') {
 			// Read operations execute once (first item), not per-item
 			try {
 				const operationResults = await executeDatabaseOperation.call(

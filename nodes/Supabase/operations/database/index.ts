@@ -252,6 +252,8 @@ export async function executeBulkDatabaseOperation(
 				return await handleBulkUpsert.call(this, supabase, itemCount);
 			case 'update':
 				return await handleBulkUpdate.call(this, supabase, itemCount);
+			case 'count':
+				return await handleBatchCount.call(this, supabase, itemCount);
 			default:
 				throw new Error(`Operation ${operation} does not support bulk mode`);
 		}
@@ -1170,4 +1172,97 @@ async function handleCount(
 	}
 
 	return [{ json: { count: totalCount, table } }];
+}
+
+/**
+ * Handle BATCH COUNT — collects groupBy values from all input items,
+ * runs a single GROUP BY SQL query via exec_sql_select, and returns
+ * one item per group with its count.
+ */
+async function handleBatchCount(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemCount: number,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', 0) as string;
+	const groupByColumn = this.getNodeParameter('groupByColumn', 0) as string;
+	validateTableName(table);
+	validateColumnName(groupByColumn);
+
+	// Collect all filters that are constant across items (non-expression filters from item 0)
+	const baseFilters = getFilters(this, 0);
+
+	// Collect unique groupBy values from all input items' filters
+	const groupValues = new Set<string>();
+	for (let i = 0; i < itemCount; i++) {
+		const itemFilters = getFilters(this, i);
+		for (const f of itemFilters) {
+			if (f.column === groupByColumn) {
+				groupValues.add(String(f.value));
+			}
+		}
+	}
+
+	// Build WHERE clauses from base filters (excluding the groupBy column)
+	const whereClauses: string[] = [];
+	const staticFilters = baseFilters.filter(f => f.column !== groupByColumn);
+	for (const f of staticFilters) {
+		const col = `"${f.column}"`;
+		switch (f.operator) {
+			case 'eq': whereClauses.push(`${col} = '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'neq': whereClauses.push(`${col} != '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'gt': whereClauses.push(`${col} > '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'gte': whereClauses.push(`${col} >= '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'lt': whereClauses.push(`${col} < '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'lte': whereClauses.push(`${col} <= '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'is': whereClauses.push(`${col} IS ${f.value}`); break;
+			case 'like': whereClauses.push(`${col} LIKE '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'ilike': whereClauses.push(`${col} ILIKE '${String(f.value).replace(/'/g, "''")}'`); break;
+			case 'in': {
+				const vals = Array.isArray(f.value) ? f.value : String(f.value).split(',');
+				const escaped = vals.map(v => `'${String(v).trim().replace(/'/g, "''")}'`).join(',');
+				whereClauses.push(`${col} IN (${escaped})`);
+				break;
+			}
+			default: whereClauses.push(`${col} = '${String(f.value).replace(/'/g, "''")}'`);
+		}
+	}
+
+	// Add IN clause for the collected groupBy values
+	if (groupValues.size > 0) {
+		const escaped = Array.from(groupValues).map(v => `'${v.replace(/'/g, "''")}'`).join(',');
+		whereClauses.push(`"${groupByColumn}" IN (${escaped})`);
+	}
+
+	// Build join clauses from Joins UI
+	const joins = this.getNodeParameter('joins.join', 0, []) as IJoinConfig[];
+	const joinClauses: string[] = [];
+	for (const j of joins) {
+		if (!j.table) continue;
+		validateTableName(j.table);
+		const joinType = j.joinType === 'inner' ? 'INNER JOIN' : 'LEFT JOIN';
+		joinClauses.push(`${joinType} "${j.table}" ON "${j.table}"."${table.replace(/s$/, '')}_id" = "${table}"."id"`);
+	}
+
+	const whereStr = whereClauses.length > 0 ? ` WHERE ${whereClauses.join(' AND ')}` : '';
+	const joinStr = joinClauses.length > 0 ? ` ${joinClauses.join(' ')}` : '';
+
+	const sql = `SELECT "${groupByColumn}", COUNT(*) as count FROM "${table}"${joinStr}${whereStr} GROUP BY "${groupByColumn}" ORDER BY count DESC`;
+
+	console.log(`[Supabase BATCH COUNT] sql: ${sql}`);
+
+	const { data, error } = await supabase.rpc('exec_sql_select', { sql });
+	if (error) throw new Error(formatSupabaseError(error));
+
+	if (!Array.isArray(data) || data.length === 0) {
+		return [{ json: { table, groupByColumn, counts: [], message: 'No rows matched' } }];
+	}
+
+	return data.map((row: any) => ({
+		json: {
+			[groupByColumn]: row[groupByColumn],
+			count: Number(row.count),
+			table,
+		},
+	}));
 }
