@@ -1138,15 +1138,26 @@ async function handleCount(
 
 	const filters = getFilters(this, itemIndex);
 
+	// Build join fragments from the Joins UI (inner join filters related rows)
+	const joins = this.getNodeParameter('joins.join', itemIndex, []) as IJoinConfig[];
+	let selectWithJoins = '*';
+	for (const j of joins) {
+		if (!j.table) continue;
+		const cols = j.columns || '*';
+		const hint = j.joinType === 'inner' ? `${j.table}!inner` : j.table;
+		selectWithJoins += `,${hint}(${cols})`;
+	}
+
 	// Chunk large IN filters to stay within URL length limits
-	const overhead = estimateUrlOverhead(hostUrl, table, undefined, filters);
+	const overhead = estimateUrlOverhead(hostUrl, table, selectWithJoins, filters);
 	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
-	const filterChunks = expandChunkedFilters(filters, maxInChars);
+	const maxItems = computeMaxIdsPerChunk(selectWithJoins);
+	const filterChunks = expandChunkedFilters(filters, maxInChars, maxItems);
 
 	let totalCount = 0;
 
 	for (const chunkFilters of filterChunks) {
-		let query = supabase.from(table).select('*', { count: 'exact', head: true });
+		let query = supabase.from(table).select(selectWithJoins, { count: 'exact', head: true });
 
 		for (const filter of chunkFilters) {
 			const operator = convertFilterOperator(filter.operator);

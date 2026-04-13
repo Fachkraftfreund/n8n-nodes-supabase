@@ -604,7 +604,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read'],
+						operation: ['read', 'count'],
 					},
 				},
 				options: [
