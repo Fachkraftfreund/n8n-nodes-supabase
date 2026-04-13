@@ -1207,7 +1207,8 @@ async function handleBatchCount(
 	const whereClauses: string[] = [];
 	const staticFilters = baseFilters.filter(f => f.column !== groupByColumn);
 	for (const f of staticFilters) {
-		const col = `"${f.column}"`;
+		// Support dotted column names like "company_phone.is_fax" → "company_phone"."is_fax"
+		const col = f.column.includes('.') ? f.column.split('.').map(p => `"${p}"`).join('.') : `"${f.column}"`;
 		switch (f.operator) {
 			case 'eq': whereClauses.push(`${col} = '${String(f.value).replace(/'/g, "''")}'`); break;
 			case 'neq': whereClauses.push(`${col} != '${String(f.value).replace(/'/g, "''")}'`); break;
