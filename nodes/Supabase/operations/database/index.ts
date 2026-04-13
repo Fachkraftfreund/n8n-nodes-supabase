@@ -1276,14 +1276,17 @@ async function handleBatchCount(
 	if (error) throw new Error(formatSupabaseError(error));
 
 	if (!Array.isArray(data) || data.length === 0) {
-		return [{ json: { table, groupByColumn, counts: [], message: 'No rows matched' } }];
+		return [{ json: { table, groupByColumn, data: [] } }];
 	}
 
-	return data.map((row: any) => ({
+	return [{
 		json: {
-			[groupByColumn]: row[groupByColumn],
-			count: Number(row.count),
 			table,
+			groupByColumn,
+			data: data.map((row: any) => ({
+				[groupByColumn]: row[groupByColumn],
+				count: Number(row.count),
+			})),
 		},
-	}));
+	}];
 }
