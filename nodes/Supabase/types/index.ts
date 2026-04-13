@@ -104,7 +104,8 @@ export type DatabaseOperation =
 	| 'dropIndex'
 	| 'customQuery'
 	| 'findOrCreate'
-	| 'updateByQuery';
+	| 'updateByQuery'
+	| 'count';
 
 export type StorageOperation =
 	| 'uploadFile'

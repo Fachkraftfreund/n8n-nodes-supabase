@@ -69,6 +69,9 @@ export async function executeDatabaseOperation(
 			case 'updateByQuery':
 				returnData.push(...await handleUpdateByQuery.call(this, supabase, itemIndex, hostUrl));
 				break;
+			case 'count':
+				returnData.push(...await handleCount.call(this, supabase, itemIndex, hostUrl));
+				break;
 			default:
 				throw new Error(`Unknown database operation: ${operation}`);
 		}
@@ -1118,4 +1121,42 @@ async function handleUpdateByQuery(
 	}
 
 	return returnData;
+}
+
+/**
+ * Handle COUNT operation — returns the number of rows matching filters
+ * without fetching actual row data (uses head: true).
+ */
+async function handleCount(
+	this: IExecuteFunctions,
+	supabase: SupabaseClient,
+	itemIndex: number,
+	hostUrl: string,
+): Promise<INodeExecutionData[]> {
+	const table = this.getNodeParameter('table', itemIndex) as string;
+	validateTableName(table);
+
+	const filters = getFilters(this, itemIndex);
+
+	// Chunk large IN filters to stay within URL length limits
+	const overhead = estimateUrlOverhead(hostUrl, table, undefined, filters);
+	const maxInChars = Math.max(500, MAX_SAFE_URL_LENGTH - overhead);
+	const filterChunks = expandChunkedFilters(filters, maxInChars);
+
+	let totalCount = 0;
+
+	for (const chunkFilters of filterChunks) {
+		let query = supabase.from(table).select('*', { count: 'exact', head: true });
+
+		for (const filter of chunkFilters) {
+			const operator = convertFilterOperator(filter.operator);
+			query = query.filter(filter.column, operator, normalizeFilterValue(filter.operator, filter.value));
+		}
+
+		const { count, error } = await query;
+		if (error) throw new Error(formatSupabaseError(error));
+		totalCount += count ?? 0;
+	}
+
+	return [{ json: { count: totalCount, table } }];
 }

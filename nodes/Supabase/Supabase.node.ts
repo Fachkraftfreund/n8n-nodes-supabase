@@ -81,6 +81,12 @@ export class Supabase implements INodeType {
 						action: 'Read rows',
 					},
 					{
+						name: 'Count',
+						value: 'count',
+						description: 'Count rows matching conditions',
+						action: 'Count rows',
+					},
+					{
 						name: 'Update',
 						value: 'update',
 						description: 'Update existing rows',
@@ -265,7 +271,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert', 'updateByQuery'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert', 'updateByQuery', 'count'],
 					},
 				},
 			},
@@ -284,7 +290,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate', 'updateByQuery'],
+						operation: ['create', 'read', 'update', 'delete', 'upsert', 'findOrCreate', 'updateByQuery', 'count'],
 					},
 				},
 			},
@@ -500,7 +506,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read', 'delete', 'updateByQuery'],
+						operation: ['read', 'delete', 'updateByQuery', 'count'],
 						uiMode: ['simple'],
 					},
 				},
@@ -562,7 +568,7 @@ export class Supabase implements INodeType {
 				displayOptions: {
 					show: {
 						resource: ['database'],
-						operation: ['read', 'delete', 'updateByQuery'],
+						operation: ['read', 'delete', 'updateByQuery', 'count'],
 						uiMode: ['advanced'],
 					},
 				},
@@ -1009,7 +1015,7 @@ export class Supabase implements INodeType {
 					throw new NodeOperationError(this.getNode(), errorMessage);
 				}
 			}
-		} else if (resource === 'database' && operation === 'read') {
+		} else if (resource === 'database' && (operation === 'read' || operation === 'count')) {
 			// Read operations execute once (first item), not per-item
 			try {
 				const operationResults = await executeDatabaseOperation.call(
