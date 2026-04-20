@@ -40,9 +40,19 @@ function escapeRegExp(s: string): string {
 	return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// Strip zero-width / invisible whitespace that sneaks in from pasted CMS/Word
+// content. These break downstream consumers (spreadsheet filters, dedup, etc.)
+// without being visible. Covers: ZWSP, ZWNJ, ZWJ, WORD JOINER, BOM/ZWNBSP.
+const INVISIBLE_CHARS_RE = /[\u200B-\u200D\u2060\uFEFF]/g;
+
+function stripInvisibleChars(s: string): string {
+	return s.replace(INVISIBLE_CHARS_RE, '');
+}
+
 function escapeCsvField(value: unknown, delimiter: string, quoteChar: string): string {
 	if (value === null || value === undefined) return '';
-	const str = typeof value === 'object' ? JSON.stringify(value) : String(value);
+	let str = typeof value === 'object' ? JSON.stringify(value) : String(value);
+	str = stripInvisibleChars(str);
 	if (
 		str.includes(delimiter) ||
 		str.includes(quoteChar) ||
